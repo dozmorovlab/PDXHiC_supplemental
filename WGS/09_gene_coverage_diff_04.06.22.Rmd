@@ -1,0 +1,185 @@
+---
+title: "Gene differential coverage analysis"
+author: "Mikhail Dozmorov"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: no
+  html_document:
+    theme: cerulean
+    toc: yes
+---
+
+```{r setup, echo=FALSE, message=FALSE, warning=FALSE}
+# Set up the environment
+library(knitr)
+opts_chunk$set(cache.path='cache/', fig.path='img/', cache=F, tidy=T, fig.keep='high', echo=F, dpi=100, warnings=F, message=F, comment=NA, warning=F, results='as.is', fig.width = 10, fig.height = 6) #out.width=700, 
+library(pander)
+panderOptions('table.split.table', Inf)
+set.seed(1)
+library(dplyr)
+options(stringsAsFactors = FALSE)
+```
+
+# Libraries
+
+```{r libraries}
+library(readr)
+library(readxl)
+library(writexl)
+library(ggplot2)
+library(ggrepel)
+library(patchwork)
+library(annotables)
+gene_annotations <- grch38 %>% mutate(Length = end - start)
+gene_annotations <- gene_annotations[, c("ensgene", "symbol", "biotype", "description", "Length")]
+gene_annotations <- gene_annotations[!duplicated(gene_annotations), ]
+# Symbols only
+gene_annotations_symbol <- gene_annotations[, c("symbol", "biotype", "description")]
+gene_annotations_symbol <- gene_annotations_symbol[gene_annotations_symbol$symbol != "", ]
+gene_annotations_symbol <- gene_annotations_symbol[!duplicated(gene_annotations_symbol), ]
+```
+
+# Settings
+
+```{r settings}
+# Gene coverage input
+dir_data <- "/Users/mdozmorov/Documents/Data/GoogleDrive/HiC_files/results/WGS/05_htseq"
+fileNameIn1 <- file.path(dir_data, "UCD52PR.txt")
+fileNameIn2 <- file.path(dir_data, "UCD52CR.txt")
+# RNA-seq data
+dir_rnaseq <- "/Users/mdozmorov/Documents/Data/GoogleDrive/HiC_files/results/RNA-seq/2021.11.19_UCD52_DEG/results"
+fileNameIn3 <- file.path(dir_rnaseq, "04.06.22_DEGs_edgeR_UCD52PR_CR_annotated.xlsx")
+# Coverage difference output
+fileNameOut1 <- file.path(dir_data, "04.06.22_UCD52PRCR_coverage_differences.xlsx")
+fileNameOut4 <- file.path(dir_data, "04.06.22_Tables_WGS_Gene_Coverage.xlsx")
+# Figures
+fileNameOut2 <- file.path(dir_data, "04.06.22_UCD52PRCR_coverage_differences_ABC.svg")
+fileNameOut3 <- file.path(dir_data, "04.06.22_UCD52PRCR_coverage_differences_all.svg")
+```
+
+# Load data
+
+Coverage of genes for PR and CR conditions
+
+```{r data}
+# PR
+mtx1 <- read_tsv(fileNameIn1, col_names = FALSE)
+mtx1 <- mtx1[!grepl("__", mtx1$X1), ] # Remove non-informative rows
+colnames(mtx1) <- c("ensgene", "PR") # Add column names
+# CR
+mtx2 <- read_tsv(fileNameIn2, col_names = FALSE)
+mtx2 <- mtx2[!grepl("__", mtx2$X1), ] # Remove non-informative rows
+colnames(mtx2) <- c("ensgene", "CR") # Add column names
+```
+
+Coverage distributions should be similar. Log2 of coverage distributions shows they are very similar.
+
+```{rfig.height=3, fig.width=4}
+mtx_to_plot <- data.frame(Condition = c(rep("PR", nrow(mtx1)), rep("CR", nrow(mtx1))), Counts = c(mtx1$PR, mtx2$CR))
+ggplot(mtx_to_plot, aes(x = log2(Counts), color = Condition)) + geom_density()
+```
+
+```{r}
+# Combine two matrices
+mtx <- full_join(mtx1, mtx2, by = "ensgene")
+# Select rows with at least one non-zero coverage
+# Or, filter out rows where coverage is 0 in both conditions
+mtx <- mtx %>% dplyr::filter(PR > 0 | CR > 0)
+
+# Append gene annotations
+mtx$ensgene <- sapply(mtx$ensgene, function(x) strsplit(x, ".", fixed = TRUE)[[1]][1])
+mtx <- left_join(mtx, gene_annotations, by = "ensgene")
+
+# Add average coverage and log2FC coverage difference
+mtx <- mtx %>% mutate(Average = rowMeans(mtx[, c("PR", "CR")]), log2FC = log2((CR + 1) / (PR + 1))) 
+```
+
+Log2FC threshold selected as the +/- 1 SD. Average coverage threshold is selected as 100, filters out approx. 25% of low-coverage genes.
+
+```{r fig.height=3, fig.width=7}
+print("Summary of log2FC")
+summary(mtx$log2FC)
+log2FC_threshold <- 1 * sd(mtx$log2FC)
+p1 <- ggplot(mtx, aes(x = log2FC)) + geom_density() + geom_vline(xintercept = log2FC_threshold)+ geom_vline(xintercept = -log2FC_threshold) + ggtitle("Log2FC distribution")
+print("Summary of average coverage")
+summary(mtx$Average)
+average_threshold <- 100 # quantile(mtx$Average, probs = c(0.25))
+p2 <- ggplot(mtx, aes(x = Average)) + geom_density() + xlim(0, 5000) + geom_vline(xintercept = average_threshold) + ggtitle("Average coverage distribution")
+p1 + p2
+```
+
+```{r}
+# Sort by score
+mtx <- mtx %>% arrange(desc(log2FC))
+# Subset to protein-coding
+mtx_protein_coding <- mtx %>% dplyr::filter(biotype == "protein_coding")
+# Filter
+mtx_protein_coding <- mtx_protein_coding %>% dplyr::filter(abs(log2FC) > log2FC_threshold & Average > average_threshold)
+# Remove genes without symbols
+mtx_protein_coding <- mtx_protein_coding %>% dplyr::filter(symbol != "")
+print(paste("Number of protein coding genes amplified:", sum(mtx_protein_coding$log2FC > 0), "; deleted:", sum(mtx_protein_coding$log2FC < 0)))
+```
+
+# Coverage-RNA-seq correlation
+
+```{r}
+# Get RNA-seq DEG statistics
+mtx_rnaseq <- read_xlsx(fileNameIn3, skip = 2)
+# Combine the data
+# mtx_combined <- inner_join(mtx[, c("ensgene", "symbol", "log2FC")], mtx_rnaseq[, c("ensgenes", "genes", "logFC")], by = c("ensgene" = "ensgenes"))
+# colnames(mtx_combined) <- c("ensgeme", "symbol", "Coverage log2FC", "genes", "Differential expression log2FC")
+
+mtx_combined <- inner_join(mtx, mtx_rnaseq[, c("ensgenes", "logFC", "logCPM", "LR", "PValue", "FDR")], by = c("ensgene" = "ensgenes"))
+colnames(mtx_combined)[colnames(mtx_combined) %in% c("log2FC", "logFC")] <- c("Coverage log2FC", "Differential expression log2FC")
+# Attach annotations
+# mtx_combined <- left_join(mtx_combined, gene_annotations, by = c("symbol"))
+mtx_combined <- mtx_combined %>% dplyr::arrange(symbol)
+# ABC transporter correlation
+ggplot(mtx_combined[grepl("^ABC", mtx_combined$symbol), ], aes(y = `Coverage log2FC`, x = `Differential expression log2FC`, color = `Differential expression log2FC`, label = symbol)) +
+  geom_point(size=2, size = 3) +
+  scale_color_gradient(low = "green", high = "red") +
+  geom_text_repel(colour = "black", size = 3) +
+  geom_smooth(method = "lm", se = FALSE) + # , max.overlaps = 10
+  theme_classic() +
+  theme(legend.position = "none") +
+  ggtitle("Coverage vs. expression changes\nABC transporters")
+ggsave(fileNameOut2, width = 3.5, height = 3.5)
+# Calculate correlation
+res <- Hmisc::rcorr(mtx_combined$`Coverage log2FC`[grepl("^ABC", mtx_combined$symbol)], mtx_combined$`Differential expression log2FC`[grepl("^ABC", mtx_combined$symbol)])
+print(paste("Pearson correlation:", round(res$r[1, 2], digits = 3), "P-value", formatC(res$P[1, 2], format = "e", digits = 3) ))
+
+# Remove unchanged genes with logFC +/- 1SD
+Coverage_log2FC_threshold <- sd(mtx_combined$`Coverage log2FC`)
+Differential_expression_log2FC_threshold <- sd(mtx_combined$`Differential expression log2FC`)
+mtx_combined_filtered <- mtx_combined %>% dplyr::filter(abs(`Coverage log2FC`) > Coverage_log2FC_threshold & abs(`Differential expression log2FC`) > Differential_expression_log2FC_threshold)
+
+ggplot(mtx_combined_filtered, aes(y = `Coverage log2FC`, x = `Differential expression log2FC`, color = `Differential expression log2FC`, label = symbol)) +
+  geom_point(size=2, size = 3) +
+  scale_color_gradient(low = "green", high = "red") +
+  geom_text_repel(colour = "black", size = 3) +
+  geom_smooth(method = "lm", se = FALSE) + # , max.overlaps = 10
+  theme_classic() +
+  theme(legend.position = "none") +
+  ggtitle("Coverage vs. expression changes\nAll genes")
+ggsave(fileNameOut3, width = 3.5, height = 3.5)
+# Calculate correlation
+res <- Hmisc::rcorr(mtx_combined_filtered$`Coverage log2FC`, mtx_combined_filtered$`Differential expression log2FC`)
+print(paste("Pearson correlation:", round(res$r[1, 2], digits = 3), "P-value", formatC(res$P[1, 2], format = "e", digits = 3) ))
+```
+
+
+
+# Save data
+
+```{r}
+x <- c(list(Protein.coding = mtx_protein_coding), list(All = mtx), list(Cov.RNAseq.all = mtx_combined), list(Cov.RNAseq.filtered = mtx_combined_filtered))
+write_xlsx(x, fileNameOut1)
+```
+
+```{r}
+# Full summary
+x <- c(list(Coverage.RNAseq = mtx_combined))
+write_xlsx(x, fileNameOut4)
+```
+
