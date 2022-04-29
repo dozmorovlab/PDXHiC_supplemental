@@ -1,0 +1,105 @@
+---
+title: "Analysis"
+author: "Mikhail Dozmorov"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: no
+  html_document:
+    theme: cerulean
+    toc: yes
+---
+
+```{r setup, echo=FALSE, message=FALSE, warning=FALSE}
+# Set up the environment
+library(knitr)
+opts_chunk$set(cache.path='cache/', fig.path='img/', cache=F, tidy=T, fig.keep='high', echo=F, dpi=100, warnings=F, message=F, comment=NA, warning=F, results='as.is', fig.width = 10, fig.height = 6) #out.width=700, 
+library(pander)
+panderOptions('table.split.table', Inf)
+set.seed(1)
+library(dplyr)
+options(stringsAsFactors = FALSE)
+```
+
+# Libraries
+
+```{r libraries}
+library(EnhancedVolcano)
+library(readxl)
+library(eulerr)
+```
+
+# Settings
+
+```{r settings}
+# Data
+# data_dir       <- "/Users/mdozmorov/Documents/Data/GoogleDrive/HiC_files/results/RNA-seq/2021.11.19_UCD52_DEG" # Working directory
+data_dir       <- "~/Google Drive/My Drive/HiC_files/results/RNA-seq/2021.11.19_UCD52_DEG" 
+fileNameIn1   <- file.path(data_dir, "results/04.06.22_DEGs_edgeR_UCD52PR_CR_annotated.xlsx") # File to save all results of differential expression analysis
+degs_sheet     <- "DEGs" # Which worksheet contains differentially expressed genes
+fileNameOut1 <- file.path(data_dir, "results/Figure_Volcano_protein_coding.svg")
+# Create output folder, if not exists
+if (!dir.exists(file.path(data_dir, "results"))) dir.create(file.path(data_dir, "results"))
+```
+
+# Load data
+
+```{r data}
+mtx <- read_xlsx(fileNameIn1, sheet = degs_sheet)
+mtx <- mtx[mtx$biotype == "protein_coding", ]
+res <- data.frame(symbol = mtx$genes, logFC = mtx$logFC, p.adj = mtx$PValue)
+res <- aggregate(cbind(symbol, p.adj) ~ logFC, data = res, FUN = max)
+rownames(res) <- res$symbol
+res$p.adj <- as.numeric(res$p.adj)
+
+```
+
+# Volcano plot
+
+```{r}
+# get top 20 upregulated and top 20 down regulated genes for labeling 
+# top 20 upregulated 
+top20UP <- res %>% 
+  arrange(p.adj) %>% # sort by p.adjusted so most significant are on the top 
+  filter(logFC > 0) %>% # filter to get the ones that are upregulated (+ logFC)
+  head(20) # get the top 20 most significant 
+
+# top 20 downregulated 
+top20DN <- res %>% 
+  arrange(p.adj) %>% # sort by p.adjusted so most significant are on the top 
+  filter(logFC < 0) %>% # filter to get the ones that are downregulated (- logFC)
+  head(20) # get the top 20 most significant 
+
+# merge the two lists to get the 40 most significant up & down regulated labels only 
+top20 <- c(top20UP$symbol, top20DN$symbol)
+
+# create custom key-value pairs for high (positive p value) and low expression (negative p values) by p values
+keyvals <- 
+  ifelse(res$logFC < 0, 'blue',
+         'red')
+# name the vector 
+names(keyvals)[keyvals == 'blue'] <- 'down'
+names(keyvals)[keyvals == 'red'] <- 'up'
+# make the volcano plot 
+# dev.off()
+# svg(fileNameOut1, width = 4, height = 6 )
+vPlot <- EnhancedVolcano(res,
+    lab = rownames(res),
+    x = 'logFC',
+    y = 'p.adj',
+    selectLab = top20,
+    pCutoff = 0.1,
+    FCcutoff = 0,
+    # ylim = c(0, 7.5),
+    labSize = 4,
+    axisLabSize = 10,
+    colCustom = keyvals,
+    #drawConnectors = TRUE,  
+    #arrowheads = FALSE,
+    #max.overlaps = 40,
+    xlim = c(-25, 20))
+# dev.off()
+ggsave(filename = fileNameOut1, plot = vPlot, width = 5, height = 6)
+```
+
+

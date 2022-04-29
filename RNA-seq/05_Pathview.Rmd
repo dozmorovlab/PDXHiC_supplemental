@@ -1,0 +1,128 @@
+---
+title: "Pathview analysis"
+author: "Mikhail Dozmorov"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: no
+  html_document:
+    theme: cerulean
+    toc: yes
+---
+
+```{r setup, echo=FALSE, message=FALSE, warning=FALSE}
+# Set up the environment
+library(knitr)
+opts_chunk$set(cache.path='cache/', fig.path='img/', cache=F, tidy=T, fig.keep='high', echo=F, dpi=100, warnings=F, message=F, comment=NA, warning=F, results='as.is', fig.width = 10, fig.height = 6) #out.width=700, 
+library(pander)
+panderOptions('table.split.table', Inf)
+set.seed(1)
+library(dplyr)
+options(stringsAsFactors = FALSE)
+```
+
+```{r libraries}
+library(pathview)
+library(readxl)
+# library(KEGG.db)
+```
+
+```{r settings}
+# Data
+data_dir       <- "/Users/mdozmorov/Documents/Data/GoogleDrive/HiC_files/results/RNA-seq/2021.11.19_UCD52_DEG/" # Working directory
+fileName_rna   <- file.path(data_dir, "results/DEGs_edgeR_UCD52PR_CR_annotated.xlsx") # File to save all results of differential expression analysis
+fileName_kegg  <- file.path(data_dir, "results/GSEA_edgeR_UCD52PR_CR_0.1_1.xlsx")
+degs_sheet     <- "protein.coding" # Which worksheet contains differentially expressed genes
+kegg_sheet     <- "Enrich.KEGG" # Which worksheet contains KEGG pathways
+n_pathways     <- 20 # How many pathways to output
+out.suffix     <- "selected" # Suffix for pathways
+# Mutually exclusive selectors, which analysis should be run. Only one may be TRUE
+human_analysis <- TRUE
+mouse_analysis <- FALSE
+
+# Prepate gene annotations, remove non-canonical chromosome names
+if (human_analysis) {
+  library(org.Hs.eg.db)
+  OrgDb = "org.Hs.eg.db"; species = "hsa"
+}
+if (mouse_analysis) {
+  library(org.Mm.eg.db)
+  OrgDb = "org.Mm.eg.db"; species = "mmu"
+}
+```
+
+```{r}
+# Differentially expressed genes
+degs <- read_xlsx(fileName_rna, sheet = degs_sheet, skip = 2)
+# Convert to EntrezID
+degs.eg <-clusterProfiler::bitr(degs$genes, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = OrgDb)
+degs <- left_join(degs, degs.eg, by = c("genes" = "SYMBOL"))
+degs <- degs[!is.na(degs$ENTREZID), ]
+degs <- aggregate(x = degs$logFC, by = list(degs$ENTREZID), FUN = max )
+colnames(degs) <- c("ENTREZID", "logFC")
+# Construct vector of FCs
+degs.genes <- degs$logFC
+names(degs.genes) <- degs$ENTREZID
+```
+
+```{r}
+# KEGG pathways
+# kegg <- read.xlsx(fileName_kegg, sheet = kegg_sheet) # All significant KEGG pathways
+# kegg_names <- kegg$Term[1:min(n_pathways, nrow(kegg))] # Text names
+kegg_names = c("ABC transporters",
+"Adherens junction",
+"Breast cancer", # hsa05224
+"Cell cycle",
+"Drug metabolism - cytochrome P450",
+"Estrogen signaling pathway", 
+"Focal adhesion",
+"Hedgehog signaling pathway",
+"mTOR signaling pathway",
+"p53 signaling pathway",
+"Pathways in cancer",
+"PI3K-Akt signaling pathway",
+"Ribosome biogenesis in eukaryotes",
+"Ribosome", 
+"Signaling pathways regulating pluripotency of stem cells", # hsa04550
+"TGF-beta signaling pathway",
+"TNF signaling pathway", 
+"Toll-like receptor signaling pathway", 
+"Wnt signaling pathway", 
+"Chemical carcinogenesis",
+"Metabolism of xenobiotics by cytochrome P450",
+"Oxidative phosphorylation")
+
+xx <- paths.hsa # as.data.frame(KEGGPATHNAME2ID) # Text to ID mapping
+setdiff(kegg_names, xx) # Names that did not map
+# Manually map unmapped IDs
+# xx[grep("Alzheimer", xx, ignore.case = TRUE)]
+kegg_unmapped <- c("05224") # Manually map unmapped ones
+# kegg_unmapped <- NULL # Use if all mapped
+kegg_ids <- c(names(xx)[xx %in% kegg_names]) # All KEGG IDs
+kegg_ids <- kegg_ids[match(kegg_names, xx[xx %in% kegg_names])] # Match name order
+kegg_ids <- sub("hsa", "", kegg_ids) # Strip off "hla"
+kegg_ids <- kegg_ids[!is.na(kegg_ids)] # Remove NAs
+kegg_ids <- c(kegg_ids, kegg_unmapped) # Attach unmapped
+
+i <- 1 # Counter
+# Cycle through each KEGG ID
+for (keggid in kegg_ids) {
+  print(keggid)
+  # Get KEGG pathway and overlay DEGs
+  pv.out <- pathview(gene.data = degs.genes, pathway.id = as.character(keggid), species = species, gene.idtype = "ENTREZ", gene.annotpkg = OrgDb, out.suffix = out.suffix)
+  # Rename PNG file
+  fileNamePngIn  <- paste0(species, keggid, ".", out.suffix, ".png")
+  fileNamePngOut <- paste0(formatC(i, format="g", digits=2, flag = "0"), ".", "hsa", keggid, ".", out.suffix, ".png")
+  system(paste0("mv ", fileNamePngIn, " ", fileNamePngOut))
+  i <- i + 1 # Increase counter
+  system(paste0("rm ", species, keggid, ".*")) # Clean up temporary files
+}
+# brew install imagemagick
+system(paste0("convert *.png ", "pathways_", out.suffix, ".pdf")) # Combine PNGs into one PDF
+system(paste0("rm *.png")) 
+```
+
+
+```{r session_info}
+xfun::session_info()
+```
