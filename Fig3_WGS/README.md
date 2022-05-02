@@ -1,5 +1,10 @@
 # Whole Genome Sequencing coverage differences between the CR and PR conditions
 
+<!-- /Users/mdozmorov/Documents/Work/GitHub/Katarzyna/PDXHiC/WGS/07_DNAcopy.Rmd -->
+- `07_DNAcopy.Rmd` - log2ratio segmentation
+    - Input: bigWig files `UCD52CR_vs_PR_hic_10kb_log2ratio.bw` from either wgs or hic coverage folders
+    - Output: diagnostic plots and a BED file with the detected DUP and DEL segments
+
 <!-- /Users/mdozmorov/Documents/Data/GoogleDrive/HiC_files/results/WGS/submit08_htseq.sh -->
 - `submit08_htseq.sh` - Counting reads in genes
     - Input: BAM files

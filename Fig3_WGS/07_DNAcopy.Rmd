@@ -1,0 +1,332 @@
+---
+title: "Analysis"
+author: "Mikhail Dozmorov"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: cerulean
+    toc: yes
+  pdf_document:
+    toc: no
+---
+
+```{r setup, echo=FALSE, message=FALSE, warning=FALSE}
+# Set up the environment
+library(knitr)
+opts_chunk$set(cache.path='cache/', fig.path='img/', cache=F, tidy=T, fig.keep='high', echo=F, dpi=100, warnings=F, message=F, comment=NA, warning=F, results='as.is', fig.width = 10, fig.height = 6) #out.width=700, 
+library(pander)
+panderOptions('table.split.table', Inf)
+set.seed(1)
+library(dplyr)
+options(stringsAsFactors = FALSE)
+```
+
+# Libraries
+
+```{r libraries}
+library(readr)
+library(rtracklayer)
+library(tidyverse)
+library(plyranges)
+library(DNAcopy)
+library(data.table)
+library(MDmisc)
+library(patchwork)
+library(writexl)
+library("ggsci")
+library(scales)
+scales::show_col(pal_lancet("lanonc")(8))
+mycols = pal_lancet("lanonc")(8)
+library(forcats)
+```
+
+# Excludable regions
+
+```{r}
+if (!file.exists("excludable.rda")) {
+  library(rCGH)
+  library(AnnotationHub)
+  ah <- AnnotationHub()
+  # Centromeres
+  # Adjust chromosome names
+  hg38$chrom[hg38$chrom == 23] <- "X"
+  hg38$chrom[hg38$chrom == 24] <- "Y"
+  hg38$chrom <- paste0("chr", hg38$chrom)
+  # Make GRanges object
+  hg38.UCSC.centromere <- makeGRangesFromDataFrame(hg38, seqnames.field = "chrom", start.field = "centromerStart", end.field = "centromerEnd")
+  # Assign seqinfo data
+  seqlengths(hg38.UCSC.centromere) <- hg38$length
+  genome(hg38.UCSC.centromere)     <- "hg38"
+  # Telomeres
+  query_data <- query(ah, c("excluderanges", "UCSC", "Homo Sapiens", "hg38", "telomere"))
+  hg38.UCSC.telomere <- query_data[["AH95938"]]
+  # Excluderanges
+  query_data <- query(ah, "excluderanges")
+  excludeGR.hg38.Kundaje.1 <- query_data[["AH95917"]]
+  save(hg38.UCSC.centromere, hg38.UCSC.telomere, excludeGR.hg38.Kundaje.1, file = "excludable.rda")
+} else {
+  load("excludable.rda")
+}
+```
+
+# Functions
+
+```{r}
+#' Convert GRanges to BED format, color according to condition
+#' @param mtx_selected data frame from GRanges
+#' @param col color
+#' @param conditon condition, goes into the name field
+#' Returns a data frame with coordinates kept in full numerical format 
+toBED <- function(mtx_selected = mtx_segment_filtered, col = "0,255,0", condition = "Common", header = FALSE) {
+  x_selected <- data.frame(chr        = mtx_selected$seqnames,
+                           start      = mtx_selected$start,
+                           end        = mtx_selected$end,
+                           name       = condition,
+                           score      = mtx_selected$seg.mean,
+                           strand     = ".",
+                           thickStart = mtx_selected$start,
+                           thickEnd   = mtx_selected$end,
+                           color      = col)
+  # Largest on top
+  x_selected <- x_selected[order(x_selected$score, decreasing = TRUE), ]
+  # Keep full numbers
+  x_selected$start <- format(x_selected$start, scientific = FALSE, trim = TRUE, justify = "none")
+  x_selected$end   <- format(x_selected$end, scientific = FALSE, trim = TRUE, justify = "none")
+  x_selected$thickStart <- format(x_selected$thickStart, scientific = FALSE, trim = TRUE, justify = "none")
+  x_selected$thickEnd   <- format(x_selected$thickEnd, scientific = FALSE, trim = TRUE, justify = "none")
+  # Append header
+  if (header){
+    x_selected <- rbind(c("track itemRgb=On", rep("", ncol(x_selected) - 1)), x_selected)
+  }
+  return(x_selected)
+}
+```
+
+
+# Settings
+
+```{r settings}
+# Maggie's home directory 
+dir_home = '~/Google Drive/My Drive'
+# Mikhail's home directory
+dir_home <- "/Users/mdozmorov/Documents/Data/GoogleDrive"
+# Resolution
+res = 10000
+# Data type
+data_type <- "wgs" # "hic"
+
+if(data_type == "hic") {
+  dir_data <- file.path(dir_home, "HiC_files/11.bigWig/03_sorted_bw")
+  fileNameRatio <- file.path(dir_data, paste0("UCD52CR_vs_PR_hic_", res, "_log2ratio.bw"))
+}
+if(data_type == "wgs") {
+  dir_data <- file.path(dir_home, "HiC_files/results/WGS/03_dedup_sorted_bw")
+  fileNameRatio <- file.path(dir_data, paste0("UCD52CR_vs_PR_wgs_", res, "_log2ratio.bw"))
+}
+
+dir_results <- file.path(dir_home, "HiC_files/results/WGS")
+fileNameOut1 <- file.path(dir_results, paste0("results/UCD52CR_vs_PR_", data_type, "_", res, "_log2ratio.bed"))
+fileNameOut2 <- file.path(dir_results, paste0("results/UCD52CR_vs_PR_", data_type, "_", res, "_log2ratio.xlsx"))
+# add fileNameOut3 for barplots 
+fileNameOut3 <- file.path(dir_results, paste0("results/UCD52CR_vs_PR_", data_type, "_", res, "_barplots.svg"))
+```
+
+# Load data
+
+```{r cache=TRUE}
+mtxHicratio <- import.bw(fileNameRatio)
+mtxHicratio <- keepStandardChromosomes(mtxHicratio, pruning.mode = "tidy")
+# Remove chrM and chrX
+mtxHicratio <- dropSeqlevels(mtxHicratio, c("chrM", "chrY"), pruning.mode = "tidy")
+# Remove overlapping telomeres
+mtxHicratio <- subsetByOverlaps(mtxHicratio, hg38.UCSC.telomere, invert = TRUE)
+# Remove overlapping centromeres
+mtxHicratio <- subsetByOverlaps(mtxHicratio, hg38.UCSC.centromere, invert = TRUE)
+
+CNA.object <- CNA(genomdat = cbind(mtxHicratio$score), chrom = as.character(seqnames(mtxHicratio)), maploc = start(mtxHicratio), data.type = "logratio", sampleid = "HiC")
+smoothed.CNA.object <- smooth.CNA(CNA.object, smooth.region = 20)
+segment.smoothed.CNA.object <- segment(smoothed.CNA.object) #, verbose=1, min.width = 5)
+# plot(segment.smoothed.CNA.object[segment.smoothed.CNA.object$data$chrom == "chr1"], plot.type="w", xmaploc = TRUE)
+# plot(segment.smoothed.CNA.object, plot.type="s")
+
+sdundo.CNA.object <- segment(smoothed.CNA.object, undo.splits="sdundo")#, undo.SD=5,verbose=1)
+# plot(subset(sdundo.CNA.object, chromlist = c("chrX")), plot.type="w", xmaploc = TRUE)
+
+# mtx_subset <- segments.summary(subset(sdundo.CNA.object, chromlist = c("chr3")))
+mtx_subset <- segments.summary(sdundo.CNA.object)
+```
+
+```{r}
+print("Summary of segment length, in bin counts")
+summary(mtx_subset$num.mark)
+# ggplot(mtx_subset, aes(x = num.mark)) +
+#   geom_density() +
+#   xlim(0, 500)
+# hist(mtx_subset$num.mark, breaks = unique(mtx_subset$num.mark), xlim = c(0, 50))
+
+print("Summary of segment value")
+summary(mtx_subset$seg.mean)
+# ggplot(mtx_subset, aes(x = seg.mean)) +
+#   geom_density()
+# hist(mtx_subset$seg.mean, breaks = unique(mtx_subset$seg.mean), xlim = c(-1, +1))
+
+# Full summary statistics, per chromosome
+mtx_summary <- cbind()
+# Counts of filtered DEL and DUP, per chromosome
+mtx_summary_filtered <- cbind()
+# Actual filtered segments
+mtx_segment_filtered <- rbind()
+# Order chromosomes
+chrom_sorted <- gtools::mixedsort(unique(sdundo.CNA.object$data$chrom))
+
+for (i in 1:length(chrom_sorted)) {
+  print(i)
+  # Summary stats for chromosome-subsetted object
+  mtx_subset <- segments.summary(subset(sdundo.CNA.object, chromlist = c(chrom_sorted[i])))
+  # Append summary of the segment number and value
+  mtx_summary <- cbind(mtx_summary, as.vector(summary(mtx_subset$num.mark)), as.vector(summary(mtx_subset$seg.mean)))
+  # Add chromosome-specific columns
+  colnames(mtx_summary)[(ncol(mtx_summary) - 1):ncol(mtx_summary)] <- paste(c("Num", "Seg"), chrom_sorted[i], sep = "-")
+  
+  # Chromosome-specific thresholds
+  # Lower number of bins (minimum segment length) to be considered
+  # num.marks_threshold <- median(mtx_subset$num.mark)
+  num.marks_threshold <- 300
+  # Min and max segmentation value cutoffs
+  # seg.mean_threshold_min <- quantile(mtx_subset$seg.mean, probs = 0.10)
+  # seg.mean_threshold_max <- quantile(mtx_subset$seg.mean, probs = 0.90)
+  seg.mean_threshold_max <- +0.2
+  seg.mean_threshold_min <- -0.2
+  # Filter segments with large length and segmentation values in any direction
+  mtx_subset_filtered <- mtx_subset %>% dplyr::filter(num.mark > num.marks_threshold, seg.mean > seg.mean_threshold_max | seg.mean < seg.mean_threshold_min)
+  # Append the number of deletions and duplications  
+  mtx_summary_filtered <- cbind(mtx_summary_filtered, cbind(nrow(mtx_subset_filtered %>% dplyr::filter(seg.mean < seg.mean_threshold_min)), nrow(mtx_subset_filtered %>% dplyr::filter(seg.mean > seg.mean_threshold_max))))
+  # Add chromosome-specific columns
+  colnames(mtx_summary_filtered)[(ncol(mtx_summary_filtered) - 1):ncol(mtx_summary_filtered)] <- paste(c("DEL", "DUP"), chrom_sorted[i], sep = "-")
+  
+  # Append filtered segments
+  mtx_segment_filtered <- rbind(mtx_segment_filtered, mtx_subset_filtered)
+}
+
+# GRanges
+gr_segment_filtered <- GRanges(seqnames = mtx_segment_filtered$chrom, ranges = IRanges(mtx_segment_filtered$loc.start, mtx_segment_filtered$loc.end))
+gr_segment_filtered$seg.mean <- mtx_segment_filtered$seg.mean
+gr_segment_filtered$type <- ifelse(mtx_segment_filtered$seg.mean > 0, "DUP", "DEL")
+gr_segment_filtered$width <- width(gr_segment_filtered)
+
+# Append summary names
+mtx_summary <- data.frame(Stats = names(summary(1)), mtx_summary, check.names = FALSE)
+# Convert to long format, full statistics
+mtx_summary_long <- mtx_summary %>% pivot_longer(., cols = c(!Stats), names_to = c("Type", "Chr"), names_sep = "-")
+# Arrange chromosomes
+mtx_summary_long$Chr <- factor(mtx_summary_long$Chr, levels = gtools::mixedsort(unique(mtx_summary_long$Chr), decreasing = TRUE))
+# Arrange summary names
+mtx_summary_long$Stats <- factor(mtx_summary_long$Stats, levels = mtx_summary_long$Stats %>% unique)
+
+# Count statistics
+mtx_summary_filtered_long <- mtx_summary_filtered %>% as_tibble() %>% pivot_longer(., cols = everything(), names_to = c("Type", "Chr"), names_sep = "-") %>% dplyr::rename("Count" = value)
+mtx_summary_filtered_wide <- mtx_summary_filtered_long %>% pivot_wider(names_from = Type, values_from = Count)
+
+# Width statistics
+gr_summary_filtered_long <- gr_segment_filtered %>% group_by(seqnames, type) %>% summarise(Width = sum(width)) %>% as_tibble() %>% dplyr::rename("Type" = type, "Chr" = seqnames)
+gr_summary_filtered_wide <- gr_summary_filtered_long %>% pivot_wider(names_from = Type, values_from = Width)
+gr_summary_filtered_wide[is.na(gr_summary_filtered_wide)] <- 0
+```
+
+# Summary statistics
+
+```{r fig.height=7}
+DT::datatable(round_df(mtx_summary))
+
+ggplot(mtx_summary_long %>% as_tibble() %>% dplyr::filter(Type == "Num"), aes(x = Chr, y = value)) +
+  geom_bar(stat="identity") + 
+  coord_flip() +
+  facet_wrap(~Stats, scales = "free") +
+  ggtitle("Segmentation length summary")
+
+ggplot(mtx_summary_long %>% as_tibble() %>% dplyr::filter(Type == "Seg"), aes(x = Chr, y = value)) +
+  geom_bar(stat="identity") + 
+  coord_flip() +
+  facet_wrap(~Stats, scales = "free") +
+  ggtitle("Segmentation values summary")
+
+```
+
+```{r fig.height=5, fig.width=5.5}
+DT::datatable(mtx_summary_filtered_wide, caption = "Count")
+DT::datatable( gr_summary_filtered_wide, caption = "Width")
+              
+mtx_summary_filtered_long$Chr <- factor(mtx_summary_filtered_long$Chr, levels = rev(unique(mtx_summary_filtered_long$Chr)))
+
+# add in fillers for the chromosomes missing values for each type 
+### do it for the ones missing DEL
+mtx_summary_filtered_long$Count[mtx_summary_filtered_long$Type == "DEL" & mtx_summary_filtered_long$Chr %in% c("chr1", "chr6", "chr11")] = NA
+
+# do it for the ones missing DUP
+mtx_summary_filtered_long$Count[mtx_summary_filtered_long$Type == "DUP" & mtx_summary_filtered_long$Chr %in% c("chr5", "chr20", "chr22")] = NA
+  
+p1 <- ggplot(mtx_summary_filtered_long %>% filter(Count != 0 | is.na(Count)), aes(x = forcats::fct_rev(Chr), y = Count, fill = Type)) +
+  geom_bar(stat = "identity", position = position_dodge2(preserve = "single")) +
+  # coord_flip() +
+  theme_bw() +
+  # get rid of the grid 
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(), 
+        text = element_text(size = 15),
+        legend.position = c(0.87, 0.70)) +
+  scale_fill_manual(values = mycols[1:2]) + # change colors 
+  xlab("")
+
+
+
+gr_summary_filtered_long$Chr <- factor(gr_summary_filtered_long$Chr, levels = rev(unique(gr_summary_filtered_long$Chr)))
+# add in fillers for the chromosomes missing values for each type 
+### do it for the ones missing DEL
+gr_summary_filtered_long <- rbind(gr_summary_filtered_long, 
+                                  data.frame(Chr = c("chr1", "chr6", "chr11"), Type = "DEL", Width = NA))
+### do it for the ones missing DUP
+gr_summary_filtered_long <- rbind(gr_summary_filtered_long, 
+                                  data.frame(Chr = c("chr5", "chr20", "chr22"), Type = "DUP", Width = NA))
+
+# do it for the ones missing DUP
+gr_summary_filtered_long$Width[gr_summary_filtered_long$Type == "DUP" & gr_summary_filtered_long$Chr %in% c("chr5", "chr20", "chr22")] = NA
+p2 <- ggplot( gr_summary_filtered_long, aes(x = forcats::fct_rev(Chr), y = Width, fill = Type)) +
+  geom_bar(stat = "identity", position = position_dodge2(preserve = "single"))+
+  # coord_flip() + 
+  theme_bw() + 
+  # get rid of the grid 
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(), 
+        text = element_text(size = 15),
+        legend.position = c(0.87, 0.70)) +
+  scale_fill_manual(values = mycols[1:2]) + # change colors  
+  xlab("") +
+  scale_y_continuous(labels = c("0", "20Mb", "40Mb", "60Mb", "80Mb"))
+
+barplot <- p1 / p2
+ggsave(filename = fileNameOut3, plot = barplot, height = 5, width = 6)
+```
+
+# Tabular summary
+
+```{r}
+gr_summary_filtered_long %>% group_by(Type) %>% summarise(Total = sum(Width, na.rm = TRUE)) %>% mutate(Proportion = (Total * 100) / 3099734149)
+```
+
+
+# Save data
+
+```{r}
+bed_combined <- rbind(toBED(as.data.frame(gr_segment_filtered %>% filter(type == "DUP")), col = "0,255,0", condition = "DUP"),
+                      toBED(as.data.frame(gr_segment_filtered %>% filter(type == "DEL")), col = "255,0,0", condition = "DEL"))
+
+# Save combined
+fwrite(bed_combined, file = fileNameOut1, quote = FALSE, sep = "\t", row.names = FALSE, col.names = FALSE)
+
+x <- c(list(Count = mtx_summary_filtered_wide), list(Width = gr_summary_filtered_wide))
+write_xlsx(x, fileNameOut2)
+```
+
+
+
+
