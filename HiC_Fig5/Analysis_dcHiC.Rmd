@@ -1,0 +1,900 @@
+---
+title: "dcHi-C results analysis"
+date: "`r Sys.Date()`"
+always_allow_html: true
+output:
+  html_document:
+    theme: cerulean
+    toc: yes
+  pdf_document:
+    toc: no
+---
+
+```{r setup, echo=FALSE, message=FALSE, warning=FALSE}
+# Set up the environment
+library(knitr)
+opts_chunk$set(cache.path = "cache/", fig.path = "img/", cache = F, tidy = T, fig.keep = "high", echo = F, dpi = 100, warnings = F, message = F, comment = NA, warning = F, results = "as.is", fig.width = 10, fig.height = 6, cache.lazy = FALSE) # out.width=700,
+library(pander)
+panderOptions("table.split.table", Inf)
+set.seed(1)
+library(dplyr)
+options(stringsAsFactors = FALSE)
+```
+
+Input Data from Ay lab `GoogleDrive/HiC_files/results/AB_compartments/dcHiC_2021-09-03`
+
+Processing differential compartment results from `dcHi-C` analysis. Significant changes may be from A to A (AA), B to B (BB), A to B (AB), and B to A (BA).
+
+- Proportion of significant AB compartment changes, genome- and Chromosome-specific. Sortable tables and plots.
+- Karyoplots
+- Overlapping gene enrichment analysis, KEGG, MSigDb.
+
+Output in `GoogleDrive/HiC_files/results/AB_compartments/dcHiC_2021-09-03/results`
+
+- BED files for each type of AB compartment change. Named as `BED_<compartment>_<resolution>_<padj_compartment_cutoff>.bed`, e.g., `BED_AA_250kb_0.01.xlsx`
+- `AB_gene_summary_250kb.xlsx` Excel file with genes overlapping AB compartment switches (individual worksheets), other summaries.
+
+# Libraries
+
+```{r libraries}
+library(annotables)
+library(rCGH)
+library(GenomicRanges)
+library(clusterProfiler)
+# library(enrichR)
+library(tidyr)
+library(stringr)
+library(writexl)
+library(readr)
+library(ggplot2)
+library(reshape2)
+library(ggsci)
+library(grid)
+library(gridExtra)
+library(BSgenome)
+library(msigdbr)
+library(karyoploteR)
+options(scipen = 999999999999999)
+library(data.table)
+library(MDmisc) # BiocManager::install("mdozmorov/MDmisc", update = FALSE)
+```
+
+# Settings
+
+```{r}
+# General settings
+# Cutoff for significant AB compartment changes
+padj_compartment_cutoff <- 0.3
+# Rerun setting, affects overwriting files.
+rerun <- FALSE
+# How to sort the barchart. If TRUE, only a sum of AB and BA changes is used. 
+# If FALSE, the total significant changes (AB, BA, AA, BB) is used
+AB_BA <- TRUE
+```
+
+```{r eval=FALSE}
+# 04-28-2021_dcHiC-results-with-problematic-chrs analysis settings
+## Dozmorov's Path
+# dir_data <- "/Users/mdozmorov/Documents/Data/GoogleDrive/HiC_files/04-28-2021_dcHiC-results-with-problematic-chrs/dchic_results_2pc/DifferentialCompartment"
+## Maggie's path 
+# dir_data <- "~/Google Drive/My Drive/HiC_files/04-28-2021_dcHiC-results-with-problematic-chrs/dchic_results_2pc/DifferentialCompartment"
+# fileNameIn1 <- "UCD52PR_vs_UCD52CR_differential_compartments.bedGraph" # Filtered results
+# fileNameIn2 <- "UCD52PR_vs_UCD52CR_full_compartment_details.bedGraph" # Full results
+# # Resolution
+# res_number <- 100000 
+# res_text <- "100kb"
+# Results folder
+# Mikhail's path 
+# dir_results <- file.path("/Users/mdozmorov/Documents/Data/GoogleDrive/HiC_files/results/04-28-2021_dcHiC-results-with-problematic-chrs", res_text)
+# Maggie's path 
+# dir_results <- file.path("~/Google Drive/My Drive/HiC_files/results/04-28-2021_dcHiC-results-with-problematic-chrs", res_text)
+# dir.create(dir_results, recursive = TRUE) # Create if does not exist
+# fileNameOut1 <- file.path(dir_results, paste0("AB_gene_summary_", res_text, ".xlsx"))
+```
+
+```{r}
+# dcHiC_2021-09-03 analysis settings
+# Mikhail's path 
+# dir_data <- "/Users/mdozmorov/Documents/Data/GoogleDrive/HiC_files/results/AB_compartments/dcHiC_2021-09-03"
+# fileNameIn1 <- "differential.intra_sample_group.Filtered.bedGraph" # Filtered results
+# fileNameIn2 <- "differential.intra_sample_group.bedGraph" # Full results
+# dcHiC_2021-12-03 analysis settings
+dir_data <- "/Users/mdozmorov/Documents/Data/GoogleDrive/HiC_files/results/AB_compartments/dcHiC_2021-12-03/"
+fileNameIn2 <- "CR_vs_PR_After_PC_Reselction_PR_chr3_PC1/viz/files/intra_compartment.bedGraph" # Full results
+
+# Resolution
+res_number <- 250000
+res_text <- "250kb"
+# Results folder
+dir_results <- file.path(dir_data, "results")
+dir.create(dir_results, recursive = TRUE) # Create if does not exist
+# All results
+fileNameOut1 <- file.path(dir_results, paste0("AB_gene_summary_", res_text,"_", padj_compartment_cutoff, ".xlsx"))
+# BED file name
+fileNameOut2 <- file.path(dir_results, paste0("AB_", res_text, "_", padj_compartment_cutoff, ".bed"))
+```
+
+## Organism selection
+
+```{r organism}
+chr <- paste0("chr", c(1:22)) # Chromosomes
+# Import centromeric regions from rCGH
+hg38_centro <- hg38
+# Change chromosome indicator to include "chr"
+hg38_centro$chrom <- paste0("chr", hg38_centro$chrom)
+# Make GRanges from centromeric locations
+hg38_centro.gr <- makeGRangesFromDataFrame(hg38_centro, seqnames.field = "chrom", start.field = "centromerStart", end.field = "centromerEnd", keep.extra.columns = TRUE)
+
+library(org.Hs.eg.db)
+OrgDb <- "org.Hs.eg.db"
+species <- "hsa"
+KEGG <- "KEGG_2019_Human"
+
+# Annotables
+gene_annotations <- grch38[!(grepl("_", grch38$chr) | grepl("GL", grch38$chr)), c("symbol", "description", "biotype")]
+gene_annotations <- gene_annotations[!duplicated(gene_annotations$symbol) & !is.na(gene_annotations$symbol) & gene_annotations$description != "", ]
+
+# BSgenome settings
+bsgenome <- "BSgenome.Hsapiens.UCSC.hg38"
+chrom.sizes <- data.frame(chr = chr, size = seqlengths(getBSgenome(genome = bsgenome, masked = FALSE))[chr])
+
+# Get all human genes
+library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+genomewide.genes <- genes(TxDb.Hsapiens.UCSC.hg38.knownGene)
+genomewide.genes <- keepSeqlevels(genomewide.genes, c(paste0("chr", 1:22), "chrX"), pruning.mode = "tidy")
+gene_symbol <- bitr(genomewide.genes$gene_id, fromType = "ENTREZID", toType = "SYMBOL", OrgDb = OrgDb)
+gene_symbol <- left_join(gene_symbol, gene_annotations, by = c("SYMBOL" = "symbol"))
+gene_symbol_entrez <- left_join(data.frame(gene_id = genomewide.genes$gene_id), gene_symbol, by = c("gene_id" = "ENTREZID"))
+genomewide.genes$symbol <- gene_symbol_entrez$SYMBOL
+genomewide.genes$description <- gene_symbol_entrez$description
+genomewide.genes$biotype <- gene_symbol_entrez$biotype
+
+# MSigDb organism
+msigdbr_org <- "Homo sapiens" # species
+```
+
+# Load A/B data and Replace Centromeric Regions with NaN
+
+```{r}
+# mtx_filtered <- read_tsv(file.path(dir_data, fileNameIn1)) # Filtered
+# mtx_filtered <- as.data.frame(mtx_filtered)
+mtx_full <- read_tsv(file.path(dir_data, fileNameIn2)) # Full
+# Log10-untransform the p-value
+mtx_full$padj <- 10^(-mtx_full$padj)
+# Chromosome sizes
+chrom_sizes <- data.frame(chr = chr, size = seqlengths(getBSgenome(genome = bsgenome, masked = FALSE))[chr])
+# Make GRanges
+chrom_sizes_gr <- GRanges(seqnames = paste0(chrom_sizes$chr), ranges = IRanges(start = 0, end = chrom_sizes$size))
+# import centromeric regions from rCGH
+hg38_centro<-hg38
+# change chromosome indicator to include "chr"
+hg38_centro$chrom <- paste0("chr", hg38_centro$chrom)
+# make gRanges from centromeric locations
+hg38_centro.gr<-makeGRangesFromDataFrame(hg38_centro, seqnames.field = "chrom", start.field = "centromerStart", end.field = "centromerEnd", keep.extra.columns = TRUE)
+# make gRanges from the resolution specific coordinates
+AB.gr<-GRanges(seqnames = mtx_full$chr, IRanges(start = mtx_full$start, end = mtx_full$end))
+mcols(AB.gr) <- mtx_full[, c("CR", "PR", "sample_maha", "padj")]
+# Remove regions outside of chromosome bounds
+olap_chrom <- findOverlaps(AB.gr, chrom_sizes_gr)
+AB.gr <- AB.gr[ queryHits(olap_chrom) ]
+# Remove overlaps between the compartments and the centromeric regions
+olap_centromere<-findOverlaps(AB.gr, hg38_centro.gr)
+AB.gr$CR[ queryHits(olap_centromere) ] <- NA
+AB.gr$PR[ queryHits(olap_centromere) ] <- NA
+
+mtx_full <- as.data.frame(AB.gr)
+colnames(mtx_full)[1] <- "chr"
+# summary(mtx_filtered$padj) # max: 0.01
+# summary(mtx_full$padj) # max: 1
+# dim(mtx_full[mtx_full$padj <= max(mtx_filtered$padj), ]) # Filtered Full = Filtered
+# summary(mtx_filtered$sample_maha)
+# summary(mtx_full$sample_maha)
+# plot(density(mtx_filtered$glosh))
+# plot(density(mtx_full$glosh))
+# cor(mtx_filtered$sample_maha, mtx_filtered$UCD52CR - mtx_filtered$UCD52PR)
+# View(data.frame(mtx_filtered$sample_maha, mtx_filtered$UCD52CR - mtx_filtered$UCD52PR))
+```
+
+# Genome-wide proportion of A/B compartments
+
+```{r}
+# Genome-wide proportion of AB compartments
+conditions <- c("PR", "CR") # Conditions
+
+# Matrix to store results
+proportioNumber_AB_genomewide <- matrix(data = 0, ncol = 2, nrow = 2)
+colnames(proportioNumber_AB_genomewide) <- conditions
+rownames(proportioNumber_AB_genomewide) <- c("Proportion A", "Proportion B")
+# For a given condition, calculate the proportion of AB compartments
+for (j in conditions) {
+  proportioNumber_A <- sum(mtx_full[, j] >  0, na.rm = TRUE) / length(mtx_full[, j][!is.na(mtx_full[, j])] )
+  proportioNumber_B <- sum(mtx_full[, j] <= 0, na.rm = TRUE) / length(mtx_full[, j][!is.na(mtx_full[, j])] )
+  proportioNumber_AB_genomewide["Proportion A", j] <- proportioNumber_A
+  proportioNumber_AB_genomewide["Proportion B", j] <- proportioNumber_B
+}
+kable(round(proportioNumber_AB_genomewide, digits = 2))
+```
+
+# Chromosome-specific proportion of A/B compartments
+
+- "UCD52PRA", "UCD52PRB", "UCD52CRA", "UCD52CRB" - the proportion of A and B compartments in each condition.
+- "A_log2FC", "B_log2FC" - log2 fold change in the A/B compartment proportions between CR and PR conditions.
+- "AB_log2FC" - difference between the A/B ratios in each condition.
+
+```{r}
+# Matrix to store results
+proportioNumber_AB_chromosome <- matrix(data = 0, ncol = 4, nrow = length(chr))
+colnames(proportioNumber_AB_chromosome) <- c("UCD52PRA", "UCD52PRB", "UCD52CRA", "UCD52CRB")
+rownames(proportioNumber_AB_chromosome) <- chr
+# For a given condition, calculate the proportion of AB compartments
+for (i in chr) {
+  for (j in conditions) {
+    mtx_full_subset <- mtx_full[mtx_full$chr == i, j]
+    proportioNumber_AB_chromosome[i, paste0("UCD52", j, "A")] <- sum(mtx_full_subset >  0, na.rm = TRUE) / length(mtx_full_subset[!is.na(mtx_full_subset)])
+    proportioNumber_AB_chromosome[i, paste0("UCD52", j, "B")] <- sum(mtx_full_subset <= 0, na.rm = TRUE) / length(mtx_full_subset[!is.na(mtx_full_subset)])
+  }
+}
+# Convert to data frame
+proportioNumber_AB_chromosome <- data.frame(Chromosome = rownames(proportioNumber_AB_chromosome), proportioNumber_AB_chromosome)
+# Append ratio of A compartment change
+proportioNumber_AB_chromosome <- proportioNumber_AB_chromosome %>% mutate(A_log2FC = log2(UCD52CRA) - log2(UCD52PRA))
+# proportioNumber_AB_chromosome$A_log2FC <- log2(proportioNumber_AB_chromosome$UCD52CRA / proportioNumber_AB_chromosome$UCD52PRA)
+# Append ratio of B compartment change
+proportioNumber_AB_chromosome <- proportioNumber_AB_chromosome %>% mutate(B_log2FC = log2(UCD52CRB / UCD52PRB))
+# Append ratio of A/B ratio compartment change
+proportioNumber_AB_chromosome <- proportioNumber_AB_chromosome %>% mutate(AB_log2FC = log2(UCD52PRA / UCD52PRB) - log2(UCD52CRA / UCD52CRB) )
+# Display interactively
+DT::datatable(round_df(proportioNumber_AB_chromosome, 5), options = list(pageLength = 22))
+```
+
+# Data preparation, filtered
+
+```{r}
+# Create data that resembles objects used in 05_AB_eigenvector
+AB_PR <- data.frame(chr   = mtx_full[mtx_full$padj <= padj_compartment_cutoff, "chr"] %>% unlist,
+                    start = mtx_full[mtx_full$padj <= padj_compartment_cutoff, "start"] %>% unlist,
+                    end   = mtx_full[mtx_full$padj <= padj_compartment_cutoff, "end"] %>% unlist,
+                    EV    = mtx_full[mtx_full$padj <= padj_compartment_cutoff, "PR"] %>% unlist)
+AB_CR <- data.frame(chr   = mtx_full[mtx_full$padj <= padj_compartment_cutoff, "chr"] %>% unlist,
+                    start = mtx_full[mtx_full$padj <= padj_compartment_cutoff, "start"] %>% unlist,
+                    end   = mtx_full[mtx_full$padj <= padj_compartment_cutoff, "end"] %>% unlist,
+                    EV    = mtx_full[mtx_full$padj <= padj_compartment_cutoff, "CR"] %>% unlist)
+AB_metadata <- data.frame(sample_maha = mtx_full[mtx_full$padj <= padj_compartment_cutoff, "sample_maha"] %>% unlist,
+                          padj  = mtx_full[mtx_full$padj <= padj_compartment_cutoff, "padj"] %>% unlist)
+
+# run assignment function on the data
+AB_PR_assigned <- AB_PR; AB_PR_assigned$compartment <- ifelse(AB_PR_assigned$EV >= 0, "A", "B")
+AB_CR_assigned <- AB_CR; AB_CR_assigned$compartment <- ifelse(AB_CR_assigned$EV >= 0, "A", "B")
+
+# Add dataset signifier to each column for distinguishing the two data sets in combined data frame
+colnames(AB_PR_assigned) <- paste0("PR", colnames(AB_PR_assigned))
+colnames(AB_CR_assigned) <- paste0("CR", colnames(AB_CR_assigned))
+
+# combine the two datasets
+AB_conditions_assigned <- cbind(AB_PR_assigned, AB_CR_assigned)
+
+# create a column for the difference in EV for each region between the two datasets
+AB_conditions_assigned$D.EV <- AB_conditions_assigned$CREV - AB_conditions_assigned$PREV
+AB_conditions_assigned$compartment <- paste0(AB_conditions_assigned$PRcompartment, AB_conditions_assigned$CRcompartment)
+AB_conditions_assigned <- cbind(AB_conditions_assigned, AB_metadata)
+```
+
+# Data preparation, unfiltered
+
+```{r}
+# Create data that resembles objects used in 05_AB_eigenvector
+AB_PR_all <- data.frame(chr   = mtx_full[, "chr"  ] %>% unlist,
+                        start = mtx_full[, "start"] %>% unlist,
+                        end   = mtx_full[, "end"  ] %>% unlist,
+                        EV    = mtx_full[, "PR"   ] %>% unlist)
+AB_CR_all <- data.frame(chr   = mtx_full[, "chr"  ] %>% unlist,
+                        start = mtx_full[, "start"] %>% unlist,
+                        end   = mtx_full[, "end"  ] %>% unlist,
+                        EV    = mtx_full[, "CR"   ] %>% unlist)
+AB_metadata_all <- data.frame(sample_maha = mtx_full[, "sample_maha"] %>% unlist,
+                          padj  = mtx_full[, "padj"] %>% unlist)
+
+# run assignment function on the data
+AB_PR_all_assigned <- AB_PR_all; AB_PR_all_assigned$compartment <- ifelse(AB_PR_all_assigned$EV >= 0, "A", "B")
+AB_CR_all_assigned <- AB_CR_all; AB_CR_all_assigned$compartment <- ifelse(AB_CR_all_assigned$EV >= 0, "A", "B")
+
+# Add dataset signifier to each column for distinguishing the two data sets in combined data frame
+colnames(AB_PR_all_assigned) <- paste0("PR", colnames(AB_PR_all_assigned))
+colnames(AB_CR_all_assigned) <- paste0("CR", colnames(AB_CR_all_assigned))
+
+# combine the two datasets
+AB_conditions_assigned_all <- cbind(AB_PR_all_assigned, AB_CR_all_assigned)
+
+# create a column for the difference in EV for each region between the two datasets
+AB_conditions_assigned_all$D.EV <- AB_conditions_assigned_all$CREV - AB_conditions_assigned_all$PREV
+AB_conditions_assigned_all$compartment <- paste0(AB_conditions_assigned_all$PRcompartment, AB_conditions_assigned_all$CRcompartment)
+AB_conditions_assigned_all <- cbind(AB_conditions_assigned_all, AB_metadata_all)
+```
+
+
+## Exploratory analysis of eigenvector differences and other measures
+
+```{r}
+DT::datatable(AB_conditions_assigned)
+```
+
+
+# RLE, Run Length Encoding
+
+Rle for determining consecutive regions of compartments with same identity (e.g. A to A, A to B, etc )
+
+```{r}
+# empty dataframe for the RLE information to be stored
+ABrun_all <- data.frame()
+# for each chromosome
+for (i in chr) {
+  # first subset by chromosome
+  AB_conditions_assigned_chr <- subset(AB_conditions_assigned, PRchr == i)
+  # run RLE and extract the results into a dataframe. Contains the length of each continuous segment and the identity of the run (AB, BA, AA, BB). Length is in number of segments of each segment type, so multiply by resolution.
+  ABrun <- data.frame(lengths = unclass(rle(AB_conditions_assigned_chr$compartment)$lengths * res_number), compartment = unclass(rle(AB_conditions_assigned_chr$compartment)$values))
+  # Fix for the end coordinate of the chromosome not spanning full resolution bin size
+  ABrun[nrow(ABrun), "lengths"] <- last(ABrun$lengths) - res_number + (max(AB_conditions_assigned_chr$PRend) - max(AB_conditions_assigned_chr$PRstart) + 1)
+  # rearrange the results of rle to get the coordinates of the AB compartments to correspond to resolution size
+  # make the start coordinate zero
+  ABrun$start <- 0
+  # use the cumulative sum of the lengths at each row to determine the end coordinates of the region range
+  ABrun$end <- cumsum(ABrun$lengths)
+  # use a lag of one to offset the end coordinates
+  lag <- lag(ABrun, 1L)
+  # use the offset coordinates in the lag object to set the start coordinates
+  ABrun$start <- lag$end
+  # fix start coordinates of each range so that they end in 1; otherwise each consecutive start coordinate is the same as the previous region's end coordinate
+  ABrun$start <- ABrun$start + 1
+  # fix first region's start coordinate, which is an NA, by changing it simply to 1
+  ABrun[1, "start"] <- 1
+  # add a column with the chr
+  ABrun$chr <- i
+  # combine the data for each chromosome into a whole genome object
+  ABrun_all <- rbind(ABrun_all, ABrun)
+}
+# subset the master dataframe of all run lengths to just those for A to A and B to B for downstream gene analysis.
+ABrun_AB <- subset(ABrun_all, compartment == "AB")
+ABrun_BA <- subset(ABrun_all, compartment == "BA")
+```
+
+# Summary of AB compartments
+
+- Only significant changes are considered.
+- Changes within the same compartment type are possible.
+- "Percent_XX" - percent of AB compartment changes with respect to chromosome length.
+- "Number_XX" - number of resolution bins of AB compartment changes.
+- "AB/BA_min/max/med" - min mean and max run lengths for AB and BA compartment changes for each chromosome, calculations are divided by 1000 to convert bases to kb
+
+```{r}
+# empty data frame to contain the summary data
+AB_summary <- data.frame(chr = chr)
+
+# modify how the chromosomes in the chom.sizes object are formatted. Adds "chr" to make it compatible with the RLE and combined EV datasets
+# chrom.sizes$chr <- paste0("chr", chrom.sizes$chr)
+
+for (i in chr) {
+  #print(chr)
+  # subset the combined data by chromosome
+  AB_conditions_assigned_chr <- subset(AB_conditions_assigned, PRchr == i)
+  # subset the computed RLE data by chromosome
+  ABrun <- subset(ABrun_all, chr == i)
+  # subset the per chromosome data into AB and BA compartments
+  AB_chr <- subset(ABrun, compartment == "AB")
+  BA_chr <- subset(ABrun, compartment == "BA")
+  # percent of PR data that is in an A compartment  ( # of regions assigned as A times resolution divided by total chromosome size )
+  AB_summary$PR_A[which(AB_summary$chr == i)] <- round(length(AB_conditions_assigned_chr$PRcompartment[which(AB_conditions_assigned_chr$PRcompartment == "A")]) * res_number / chrom.sizes$size[which(chrom.sizes$chr == i)] * 100, 2)
+  # percent of PR data that is in an B compartment  ( # of regions assigned as B times resolution divided by total chromosome size )
+  AB_summary$PR_B[which(AB_summary$chr == i)] <- round(length(AB_conditions_assigned_chr$PRcompartment[which(AB_conditions_assigned_chr$PRcompartment == "B")]) * res_number / chrom.sizes$size[which(chrom.sizes$chr == i)] * 100, 2)
+  # percent of CR data that is in an A compartment  ( # of regions assigned as A times resolution divided by total chromosome size )
+  AB_summary$CR_A[which(AB_summary$chr == i)] <- round(length(AB_conditions_assigned_chr$CRcompartment[which(AB_conditions_assigned_chr$CRcompartment == "A")]) * res_number / chrom.sizes$size[which(chrom.sizes$chr == i)] * 100, 2)
+  # percent of CR data that is in an B compartment  ( # of regions assigned as B times resolution divided by total chromosome size )
+  AB_summary$CR_B[which(AB_summary$chr == i)] <- round(length(AB_conditions_assigned_chr$CRcompartment[which(AB_conditions_assigned_chr$CRcompartment == "B")]) * res_number / chrom.sizes$size[which(chrom.sizes$chr == i)] * 100, 2)
+  # Percent of chromosome length as one of four switches: AA, BB, AB, BA.  These are summed together in a fifth category of switch type
+  # Percent of chromosome that was A to A compartment compartment
+  AB_summary$Percent_AA[which(AB_summary$chr == i)] <- round(sum(AB_conditions_assigned_chr$PRend[AB_conditions_assigned_chr$compartment == "AA"] - AB_conditions_assigned_chr$PRstart[AB_conditions_assigned_chr$compartment == "AA"]) / chrom.sizes$size[which(chrom.sizes$chr == i)] * 100, 2)
+  # Percent of chromosome that was B to B compartment compartment
+  AB_summary$Percent_BB[which(AB_summary$chr == i)] <- round(sum(AB_conditions_assigned_chr$PRend[AB_conditions_assigned_chr$compartment == "BB"] - AB_conditions_assigned_chr$PRstart[AB_conditions_assigned_chr$compartment == "BB"]) / chrom.sizes$size[which(chrom.sizes$chr == i)] * 100, 2)
+  # Percent of chromosome that was A to B compartment compartment
+  AB_summary$Percent_AB[which(AB_summary$chr == i)] <- round(sum(AB_conditions_assigned_chr$PRend[AB_conditions_assigned_chr$compartment == "AB"] - AB_conditions_assigned_chr$PRstart[AB_conditions_assigned_chr$compartment == "AB"]) / chrom.sizes$size[which(chrom.sizes$chr == i)] * 100, 2)
+  # Percent of chromosome that was B to A compartment compartment
+  AB_summary$Percent_BA[which(AB_summary$chr == i)] <- round(sum(AB_conditions_assigned_chr$PRend[AB_conditions_assigned_chr$compartment == "BA"] - AB_conditions_assigned_chr$PRstart[AB_conditions_assigned_chr$compartment == "BA"]) / chrom.sizes$size[which(chrom.sizes$chr == i)] * 100, 2)
+    # Total number of bins with AB compartment changes
+  # Total number of bins staying AA 
+  AB_summary$Number_AA[which(AB_summary$chr == i)] <- sum(AB_conditions_assigned_chr$compartment == "AA")
+  # Total number of bins staying BB 
+  AB_summary$Number_BB[which(AB_summary$chr == i)] <- sum(AB_conditions_assigned_chr$compartment == "BB")
+  # Total number of bins switching AB
+  AB_summary$Number_AB[which(AB_summary$chr == i)] <- sum(AB_conditions_assigned_chr$compartment == "AB")
+  # Total number of bins switching BA
+  AB_summary$Number_BA[which(AB_summary$chr == i)] <- sum(AB_conditions_assigned_chr$compartment == "BA")
+  
+  # add min mean and max run lengths for AB and BA compartment changes for each chromosome
+  # AB min, mean, and max of run lengths. Calculations are divided by 1000 to convert bases to kb.
+  if (nrow(AB_chr) > 0) {
+    AB_summary$ABmin[which(AB_summary$chr == i)] <- round(min(AB_chr$lengths) / res_number, 0)
+    AB_summary$ABmean[which(AB_summary$chr == i)] <- round(mean(AB_chr$lengths) / res_number, 2)
+    AB_summary$ABmax[which(AB_summary$chr == i)] <- round(max(AB_chr$lengths) / res_number, 0)
+  } else {
+    AB_summary$ABmin[which(AB_summary$chr == i)] <- 0
+    AB_summary$ABmean[which(AB_summary$chr == i)] <- 0
+    AB_summary$ABmax[which(AB_summary$chr == i)] <- 0
+  }
+  # BA min, mean, and max of run lengths
+  if (nrow(BA_chr) > 0) {
+    AB_summary$BAmin[which(AB_summary$chr == i)] <- round(min(BA_chr$lengths) / res_number, 0)
+    AB_summary$BAmean[which(AB_summary$chr == i)] <- round(mean(BA_chr$lengths) / res_number, 2)
+    AB_summary$BAmax[which(AB_summary$chr == i)] <- round(max(BA_chr$lengths) / res_number, 0)
+  } else {
+    AB_summary$BAmin[which(AB_summary$chr == i)] <- 0
+    AB_summary$BAmean[which(AB_summary$chr == i)] <- 0
+    AB_summary$BAmax[which(AB_summary$chr == i)] <- 0
+  }
+}
+# Subset and rename columns
+#AB_summary <- AB_summary[, c("chr", "Percent_AA", "Percent_BB", "Percent_AB", "Percent_BA", "Number_AA", "Number_BB", "Number_AB", "Number_BA")]
+# Visualize
+DT::datatable(AB_summary, options = list(pageLength = 22))
+```
+
+# KaryoploteR Plots and Per Chromosome AB Compartments and EVs
+
+```{r fig.height=4}
+# diagnostic plots of the AB compartments and changes. Each data set EV is plotted and the change in EV and color coded to identify switches
+for (i in chr) {
+  # subset by chromosome
+  AB_conditions_assigned_chr <- subset(AB_conditions_assigned, PRchr == i)
+  # subset the per chromosome switch types
+  # AB switches
+  chr_ab <- subset(AB_conditions_assigned_chr, compartment == "AB")
+  # BA switches
+  chr_ba <- subset(AB_conditions_assigned_chr, compartment == "BA")
+  # AA switches
+  chr_aa <- subset(AB_conditions_assigned_chr, compartment == "AA")
+  # BB switches
+  chr_bb <- subset(AB_conditions_assigned_chr, compartment == "BB")
+
+  # plot the chromosome
+  kp <- plotKaryotype(chromosomes = i, genome = "hg38", plot.type = 1)
+  # add base numbers to the plot
+  kpAddBaseNumbers(kp)
+
+  # PR EV plot
+  # define r0 and r1, the min and max of the plot area. Allows for easy scaling of the plot area
+  r0 <- 0.0
+  r1 <- 0.35
+  # Add the PR EVs segments and scale to the min and max of the EV values
+  kpSegments(kp, chr = i, x0 = AB_conditions_assigned_chr$PRstart, x1 = AB_conditions_assigned_chr$PRstart, y0 = 0, y1 = AB_conditions_assigned_chr$PREV, r0 = r0, r1 = r1, ymax = max(AB_conditions_assigned_chr$PREV, na.rm = T), ymin = min(AB_conditions_assigned_chr$PREV, na.rm = T))
+  # Add the PR EV plot label
+  kpAddLabels(kp, labels = "PR", r0 = r0, r1 = r1, data.panel = 1, label.margin = 0.04, cex = 1.4)
+  # Add the axis, scaled for min and max of the PR EVs
+  kpAxis(kp, r0 = r0, r1 = r1, cex = 0.65, ymax = max(AB_conditions_assigned_chr$PREV, na.rm = T), ymin = min(AB_conditions_assigned_chr$PREV, na.rm = T), tick.pos = c(max(AB_conditions_assigned_chr$PREV, na.rm = T), 0, min(AB_conditions_assigned_chr$PREV, na.rm = T)))
+  # Add A and B labels to the axis
+  kpAddLabels(kp, labels = "B", r0 = r0, r1 = r0 + ((r1 - r0) / 2), cex = 1.0)
+  kpAddLabels(kp, labels = "A", r0 = r0 + ((r1 - r0) / 2), r1 = r1, cex = 1.0)
+
+  # CR EV plot
+  # define r0 and r1, the min and max of the plot area. Allows for easy scaling of the plot area
+  r0 <- 0.4
+  r1 <- 0.75
+  # Add the CR EVs segments and scale to the min and max of the EV values
+  kpSegments(kp, chr = i, x0 = AB_conditions_assigned_chr$CRstart, x1 = AB_conditions_assigned_chr$CRstart, y0 = 0, y1 = AB_conditions_assigned_chr$CREV, r0 = r0, r1 = r1, ymax = max(AB_conditions_assigned_chr$CREV, na.rm = T), ymin = min(AB_conditions_assigned_chr$CREV, na.rm = T), col = "#666666")
+  # Add the CR EV plot label
+  kpAddLabels(kp, labels = "CR", r0 = r0, r1 = r1, data.panel = 1, label.margin = 0.04, cex = 1.4)
+  # Add the axis, scaled for min and max of the CR EVs
+  kpAxis(kp, r0 = r0, r1 = r1, cex = 0.65, ymax = max(AB_conditions_assigned_chr$CREV, na.rm = T), ymin = min(AB_conditions_assigned_chr$CREV, na.rm = T), tick.pos = c(max(AB_conditions_assigned_chr$CREV, na.rm = T), 0, min(AB_conditions_assigned_chr$CREV, na.rm = T)))
+  # Add A and B labels to the axis
+  kpAddLabels(kp, labels = "B", r0 = r0, r1 = r0 + ((r1 - r0) / 2), cex = 1.0)
+  kpAddLabels(kp, labels = "A", r0 = r0 + ((r1 - r0) / 2), r1 = r1, cex = 1.0)
+
+  # Delta EV plot (CR EV minus PR EV)
+  # define r0 and r1, the min and max of the plot area. Allows for easy scaling of the plot area
+  r0 <- 0.8
+  r1 <- 1.1
+  # Plot the AA delta EV segments
+  kpSegments(kp, chr = i, x0 = chr_aa$PRstart, x1 = chr_aa$PRstart, y0 = 0, y1 = chr_aa$D.EV, r0 = r0, r1 = r1, ymax = max(AB_conditions_assigned_chr$D.EV, na.rm = T), ymin = min(AB_conditions_assigned_chr$D.EV, na.rm = T), col = "gray")
+  # Plot the BB delta EV segments
+  kpSegments(kp, chr = i, x0 = chr_bb$PRstart, x1 = chr_bb$PRstart, y0 = 0, y1 = chr_bb$D.EV, r0 = r0, r1 = r1, ymax = max(AB_conditions_assigned_chr$D.EV, na.rm = T), ymin = min(AB_conditions_assigned_chr$D.EV, na.rm = T), col = "gray")
+  # Plot the AB delta EV segments
+  kpSegments(kp, chr = i, x0 = chr_ab$PRstart, x1 = chr_ab$PRstart, y0 = 0, y1 = chr_ab$D.EV, r0 = r0, r1 = r1, ymax = max(AB_conditions_assigned_chr$D.EV, na.rm = T), ymin = min(AB_conditions_assigned_chr$D.EV, na.rm = T), col = "blue")
+  # Plot the BA delta EV segments
+  kpSegments(kp, chr = i, x0 = chr_ba$PRstart, x1 = chr_ba$PRstart, y0 = 0, y1 = chr_ba$D.EV, r0 = r0, r1 = r1, ymax = max(AB_conditions_assigned_chr$D.EV, na.rm = T), ymin = min(AB_conditions_assigned_chr$D.EV, na.rm = T), col = "red")
+  # Add axis labels
+  kpAddLabels(kp, labels = expression(paste(Delta, "EV")), r0 = r0, r1 = r1, data.panel = 1, label.margin = 0.035, cex = 1.4)
+  # Add the axis scaled to the min and max of the delta EV values
+  kpAxis(kp, r0 = r0, r1 = r1, cex = 0.65, ymax = max(AB_conditions_assigned_chr$D.EV, na.rm = T), ymin = min(AB_conditions_assigned_chr$D.EV, na.rm = T), tick.pos = c(round(max(AB_conditions_assigned_chr$D.EV, na.rm = T), 3), 0, round(min(AB_conditions_assigned_chr$D.EV, na.rm = T), 3)))
+
+  # Add the legend indicating the color of the switches in the delta EV plot
+  legend(x = "topright", fill = c("gray", "gray", "blue", "red"), legend = c("AA", "BB", "AB", "BA"), y.intersp = 1, ncol = 2, cex = 1)
+}
+```
+
+```{r eval=FALSE}
+# Similar to plots in the above code chunk, but plots only the per chromosome change in EVs and groups AA and BB changes into one color. Easier to see regions that contain AB or BA switches
+
+for (i in chr) {
+  # subset by chromosome
+  AB_conditions_assigned_chr <- subset(AB_conditions_assigned, PRchr == i)
+  # subset the per chromosome switch types
+  # AB switches
+  chr_ab <- subset(AB_conditions_assigned_chr, compartment == "AB")
+  # BA switches
+  chr_ba <- subset(AB_conditions_assigned_chr, compartment == "BA")
+  # AA switches
+  chr_aa <- subset(AB_conditions_assigned_chr, compartment == "AA")
+  # BB switches
+  chr_bb <- subset(AB_conditions_assigned_chr, compartment == "BB")
+
+  # plot each chromosome
+  kp <- plotKaryotype(chromosomes = i, genome = "hg38", plot.type = 1)
+  # add base numbers
+  kpAddBaseNumbers(kp)
+  # Delta EV plot (CR EV minus PR EV)
+  # define r0 and r1, the min and max of the plot area. Allows for easy scaling of the plot area
+  r0 <- 0.4
+  r1 <- 0.75
+  # Plot the AA delta EV segments
+  kpSegments(kp, chr = i, x0 = chr_aa$PRstart, x1 = chr_aa$PRstart, y0 = 0, y1 = chr_aa$D.EV, r0 = r0, r1 = r1, ymax = max(AB_conditions_assigned_chr$D.EV, na.rm = T), ymin = min(AB_conditions_assigned_chr$D.EV, na.rm = T), col = "#666666")
+  # Plot the BB delta EV segments
+  kpSegments(kp, chr = i, x0 = chr_bb$PRstart, x1 = chr_bb$PRstart, y0 = 0, y1 = chr_bb$D.EV, r0 = r0, r1 = r1, ymax = max(AB_conditions_assigned_chr$D.EV, na.rm = T), ymin = min(AB_conditions_assigned_chr$D.EV, na.rm = T), col = "#666666")
+  # Plot the AB delta EV segments
+  kpSegments(kp, chr = i, x0 = chr_ab$PRstart, x1 = chr_ab$PRstart, y0 = 0, y1 = chr_ab$D.EV, r0 = r0, r1 = r1, ymax = max(AB_conditions_assigned_chr$D.EV, na.rm = T), ymin = min(AB_conditions_assigned_chr$D.EV, na.rm = T), col = "blue")
+  # Plot the BA delta EV segments
+  kpSegments(kp, chr = i, x0 = chr_ba$PRstart, x1 = chr_ba$PRstart, y0 = 0, y1 = chr_ba$D.EV, r0 = r0, r1 = r1, ymax = max(AB_conditions_assigned_chr$D.EV, na.rm = T), ymin = min(AB_conditions_assigned_chr$D.EV, na.rm = T), col = "red")
+  # Add axis labels
+  kpAddLabels(kp, labels = expression(paste(Delta, "EV")), r0 = r0, r1 = r1, data.panel = 1, label.margin = 0.035, cex = 1.4)
+  # Add the axis scaled to the min and max of the delta EV values
+  kpAxis(kp, r0 = r0, r1 = r1, cex = 0.65, ymax = max(AB_conditions_assigned_chr$D.EV, na.rm = T), ymin = min(AB_conditions_assigned_chr$D.EV, na.rm = T), tick.pos = c(round(max(AB_conditions_assigned_chr$D.EV, na.rm = T), 3), 0, round(min(AB_conditions_assigned_chr$D.EV, na.rm = T), 3)))
+  # Add the legend indicating the color of the switches in the delta EV plot
+  legend(x = "topright", fill = c("#666666", "blue", "red"), legend = c("AA and BB", "AB", "BA"), y.intersp = 0.7, ncol = 1, cex = 0.95)
+}
+```
+
+# Bar charts
+Summary of bar charts for each dataset and differences between datasets on a per chromosomal basis. 
+
+```{r fig.height=4}
+# generates summary bar charts for each data set and the differences between datasets on a per chromosomal basis.
+# Note: some regions have NA for EV so the total doesn't always sum to 100%
+# !Need to summarize across all chromosomes once chr23 EVs are computed.
+
+# PR summary stacked bar plots
+# subset the summary file for just the PR relevant data
+PR_summary <- AB_summary[, c("chr", "PR_A", "PR_B")]
+# reformat the data to the preferred long format for the stacked bar plots. Also remove "chr" from chromosome names
+PR_summary <- PR_summary %>%
+  mutate(chr = factor(row_number())) %>%
+  gather(variable, value, -chr)
+# Order chromosomes
+chr_summary <- aggregate(PR_summary$value, by = list(PR_summary$chr), sum)
+PR_summary$chr <- factor(PR_summary$chr, levels = chr_summary$Group.1[order(chr_summary$x, decreasing = TRUE)])
+# define the plot parameters
+PRsum.plot <- ggplot(PR_summary, aes(
+  x = chr, y = value,
+  fill = factor(variable, levels = c("PR_B", "PR_A"))
+)) +
+  geom_bar(stat = "identity")
+# plot the stacked bar plots
+PRsum.plot + scale_fill_brewer(palette = "Spectral") + xlab("Chromosome") + ylab("Percent Compartment ID") + ggtitle("PR AB Compartment switches By Chromosome") + guides(fill = guide_legend(title = "ID Type"))
+
+
+# CR summary stacked bar plots
+# subset the summary file for just the CR relevant data
+CR_summary <- AB_summary[, c("chr", "CR_A", "CR_B")]
+# reformat the data to the preferred long format for the stacked bar plots. Also remove "chr" from chromosome names
+CR_summary <- CR_summary %>%
+  mutate(chr = factor(row_number())) %>%
+  gather(variable, value, -chr)
+# Order chromosomes
+chr_summary <- aggregate(CR_summary$value, by = list(CR_summary$chr), sum)
+CR_summary$chr <- factor(CR_summary$chr, levels = chr_summary$Group.1[order(chr_summary$x, decreasing = TRUE)])
+# define the plot parameters
+CRsum.plot <- ggplot(CR_summary, aes(
+  x = chr, y = value,
+  fill = factor(variable, levels = c("CR_B", "CR_A"))
+)) +
+  geom_bar(stat = "identity")
+# plot the stacked bar plots
+CRsum.plot + scale_fill_brewer(palette = "Spectral") + xlab("Chromosome") + ylab("Percent Compartment ID") + ggtitle("CR AB Compartments switches By Chromosome") + guides(fill = guide_legend(title = "ID Type"))
+
+# compartment switches summary stacked bar plots including percent of regions that switched.
+conditions_summary <- AB_summary[, c("chr", "Percent_AA", "Percent_BB", "Percent_AB", "Percent_BA")]
+# reformat the data to the preferred long format for the stacked bar plots. Also remove "chr" from chromosome names
+conditions_summary <- conditions_summary %>%
+  mutate(chr = factor(row_number())) %>%
+  gather(variable, value, -chr)
+# Sort by largest-to-smallest switches
+# Proportions for any switch, to order chromosomes
+if (!AB_BA) {
+  # Use total AB changes for the genome-wide results
+  conditions_summary_AB_BA <- conditions_summary
+} else {
+  # Use only AB and BA changes for significant results
+  conditions_summary_AB_BA <- conditions_summary[conditions_summary$variable %in% c("Percent_AB", "Percent_BA"), ]
+}
+# Sum them up for any type of switch
+conditions_summary_AB_BA <- aggregate(conditions_summary_AB_BA$value, by = list(conditions_summary_AB_BA$chr), FUN = sum)
+colnames(conditions_summary_AB_BA) <- c("chr", "percent")
+# Order chromosomes
+conditions_summary$chr <- factor(conditions_summary$chr, levels = conditions_summary_AB_BA$chr[order(conditions_summary_AB_BA$percent, decreasing = TRUE)])
+# define the plot parameters
+conditions_AB <- ggplot(conditions_summary, aes(
+  x = chr, y = value,
+  fill = factor(variable, levels = c("Percent_BA", "Percent_AB", "Percent_BB", "Percent_AA"))
+)) +
+  geom_bar(stat = "identity")
+# plot the stacked bar plots
+conditions_AB + scale_fill_brewer(palette = "Spectral") + xlab("Chromosome") + ylab("Percent Compartment ID") + ggtitle("AB Compartment switches By Chromosome") + guides(fill = guide_legend(title = "ID Type"))
+ggsave(paste0("../manuscript/figures/dcHiC_AB_switches_per_chr_", padj_compartment_cutoff, ".svg"), width = 7, height = 2.5)
+```
+
+```{r fig.height=6}
+#' Plot the proportion of a selected AB compartment change, 
+#' chromosomes sorted from larger to smaller fraction
+#' @param conditions conditions to visualize. Any combination of "Percent_AA", "Percent_BB", "Percent_AB", "Percent_BA"
+#' @param cols colors. Should be the same number as conditions
+plot_condition <- function(conditions = c("Percent_AA"), cols = "#99D594") {
+  # Select data
+  conditions_summary <- AB_summary[, c("chr", conditions)]
+  # Reformat into long form
+  condition_summary_long <- melt(conditions_summary, id = "chr")
+  condition_summary_long$chr <- factor(condition_summary_long$chr, levels = conditions_summary$chr[order(conditions_summary %>% dplyr::select(starts_with("Percent")) %>% apply(., 1, sum), decreasing = FALSE)])
+  # display.brewer.pal(7, "Spectral")
+  # brewer.pal(7, "Spectral")
+  p <- ggplot(condition_summary_long, aes(x = chr, y = value, fill = factor(variable))) +
+    geom_bar(stat = "identity") +
+    theme_bw() +
+    scale_fill_manual(values = cols) + 
+    ylab("Percent of the chromosome length") +
+    coord_flip()
+  p
+}
+
+plot_AA <- plot_condition(conditions = c("Percent_AA"), cols = "#99D594")
+plot_BB <- plot_condition(conditions = c("Percent_BB"), cols = "#FC8D59")
+plot_AB <- plot_condition(conditions = c("Percent_AB"), cols = "#FEE08B")
+plot_BA <- plot_condition(conditions = c("Percent_BA"), cols = "#D53E4F")
+
+grid.arrange(plot_AA, plot_BB, plot_AB, plot_BA, ncol = 2)
+```
+
+```{r fig.height=3.5, fig.width=5}
+# All conditions
+plot_all <- plot_condition(conditions = c("Percent_AA", "Percent_BB", "Percent_AB", "Percent_BA"), cols = c("#99D594", "#FC8D59", "#FEE08B", "#D53E4F"))
+plot_all
+```
+
+# Piecharts of compartment switches 
+
+```{r fig.height=6}
+# Get the number of compartments for each switch 
+sum_AA <- sum(AB_summary$Number_AA)
+sum_AB <- sum(AB_summary$Number_AB)
+sum_BB <- sum(AB_summary$Number_BB)
+sum_BA <- sum(AB_summary$Number_BA)
+slices <- c(sum_AA, sum_BB, sum_AB, sum_BA)
+
+# transform the counts to percentages for the legend 
+pct <- round(slices/sum(slices)*100, digits = 2)
+lbls <- c("Percent_AA", "Percent_BB", "Percent_AB", "Percent_BA")
+lbls <- paste(lbls, pct) # add percents to labels 
+lbls <- paste(lbls,"%",sep="") # add % to labels
+
+svg(paste0("manuscript/figures/dcHiC_pie_", padj_compartment_cutoff, ".svg"), width = 4.5, height = 4.5)
+pie(slices,labels = lbls, col=rainbow(length(lbls)), init.angle = 7 0,
+   main="Compartment changes in PR & CR conditions, excluding non-changed regions")
+dev.off()
+ ```
+
+# Eigenvector distribution per compartment change
+
+```{r}
+aggregated_ev <- data.frame(Condition = c(rep("PR", nrow(AB_conditions_assigned)), rep("CR", nrow(AB_conditions_assigned))),
+                            EV = c(AB_conditions_assigned$PREV, AB_conditions_assigned$CREV),
+                            Switch = c(AB_conditions_assigned$compartment, AB_conditions_assigned$compartment))
+
+ggplot(aggregated_ev, aes(x=Switch, y=EV, fill=Condition)) +
+  geom_violin(position=position_dodge(1)) +
+  geom_boxplot(width=0.1, position=position_dodge(1))
+```
+
+# Genes and Gene Enrichments
+
+## Obtain the ranked genes to be used in GSEA
+
+Function obtained from `05_AB_eigenvector.Rmd`
+```{r}
+# function to Find genes in AB or BA regions by detecting overlap between those regions and gene TSS sites in hg38 from above
+detect_genes_ranked <- function(rle_dataset) {
+  # convert the compartment switch ranges to GRanges object
+  rle_dataset.gr <- makeGRangesFromDataFrame(rle_dataset, seqnames.field = "chr", start.field = "start", end.field = "end", keep.extra.columns = TRUE)
+  # detect overlaps with hg38 reference genes
+  rle_dataset_gene_olap <- findOverlaps(rle_dataset.gr, genomewide.genes)
+  # extract the overlaps as gene symbols
+  rle_dataset_genes <- rle_dataset_gene_olap %>%
+    as.data.frame() %>%
+    # group_by(queryHits) %>%
+    mutate(genes = genomewide.genes$gene_id[subjectHits]) %>%
+    dplyr::select(queryHits, genes) %>%
+    distinct()
+  # temporary data frame containing the region data
+  tmpAB <- rle_dataset %>%
+    dplyr::select(chr, start, end, D.EV, switch) %>%
+    mutate(id = 1:nrow(rle_dataset))
+  # combine gene symbols and regions
+  rle_dataset_genes <- left_join(rle_dataset_genes, tmpAB, by = c("queryHits" = "id"))
+  # Get gene names
+  gene_symbols <- bitr(rle_dataset_genes$genes, fromType = "ENTREZID", toType = "SYMBOL", OrgDb = OrgDb)
+  rle_dataset_genes <- left_join(rle_dataset_genes, gene_symbols, by = c("genes" = "ENTREZID"))
+  # Aggregate by maximum absolute Eigenvector difference
+  rle_dataset_genes <- aggregate(D.EV ~ SYMBOL, rle_dataset_genes, max)
+  # Append description
+  rle_dataset_genes <- left_join(rle_dataset_genes, gene_annotations, by = c("SYMBOL" = "symbol"))
+  # rearrange the columns
+  rle_dataset_genes <- rle_dataset_genes[, c("SYMBOL", "D.EV", "description", "biotype")]
+  colnames(rle_dataset_genes)[1] <- "genes" # Rename the first column
+  # Order by largest to smallest difference
+  rle_dataset_genes <- rle_dataset_genes[order(rle_dataset_genes$D.EV, decreasing = TRUE), ]
+  # Return the dataset
+  rle_dataset_genes 
+}
+
+AB_conditions_assigned_subset <- AB_conditions_assigned[, c("PRchr", "PRstart", "PRend", "D.EV", "compartment")]
+colnames(AB_conditions_assigned_subset) <- c("chr", "start", "end", "D.EV", "switch")
+
+genes_AA_ranked <- detect_genes_ranked(AB_conditions_assigned_subset[AB_conditions_assigned_subset$switch == "AA", ])
+genes_BB_ranked <- detect_genes_ranked(AB_conditions_assigned_subset[AB_conditions_assigned_subset$switch == "BB", ])
+genes_AB_ranked <- detect_genes_ranked(AB_conditions_assigned_subset[AB_conditions_assigned_subset$switch == "AB", ])
+genes_BA_ranked <- detect_genes_ranked(AB_conditions_assigned_subset[AB_conditions_assigned_subset$switch == "BA", ])
+
+# All regions
+AB_conditions_assigned_all_subset <- AB_conditions_assigned_all[, c("PRchr", "PRstart", "PRend", "D.EV", "compartment")]
+colnames(AB_conditions_assigned_all_subset) <- c("chr", "start", "end", "D.EV", "switch")
+
+genes_all_ranked <- detect_genes_ranked(AB_conditions_assigned_all_subset)
+```
+
+## Oncogene annotations
+
+```{r}
+# Add onco annotations to the gene lists
+# Import PCAWG_C, PCAWG_N, COSMIC oncogene annotation lists
+PCAWG_C <- read.table(file = "https://raw.githubusercontent.com/mdozmorov/Cancer_notes/master/data/PCAWG_2020_PID_C_87_genes.txt", header = FALSE)
+PCAWG_N <- read.table(file = "https://raw.githubusercontent.com/mdozmorov/Cancer_notes/master/data/PCAWG_2020_PID_N_93_genes.txt", header = FALSE)
+COSMIC <- read.table(file = "https://raw.githubusercontent.com/mdozmorov/Cancer_notes/master/data/COSMIC_genes.txt", header = FALSE)
+BushmanLab <- read.table(file = "https://raw.githubusercontent.com/mdozmorov/Cancer_notes/master/data/allOnco_May2018.tsv")
+
+# function add the annotations to gene lists
+add_onco <- function(dataset) {
+  # DEGs detected in COSMIC
+  degs_cosmic <- ifelse(dataset$genes %in% intersect(dataset$genes, COSMIC$V1), "Yes", "")
+  degs_bushman <- ifelse(dataset$genes %in% intersect(dataset$genes, BushmanLab$V1), "Yes", "")
+  # DEGs detected in PID-C set
+  degs_PID_C <- ifelse(dataset$genes %in% intersect(dataset$genes, PCAWG_C$V1), "Yes", "")
+  # DEGs detected in PID-N set
+  degs_PID_N <- ifelse(dataset$genes %in% intersect(dataset$genes, PCAWG_N$V1), "Yes", "")
+
+  # Attach these annotations
+  dataset <- data.frame(dataset, COSMIC = degs_cosmic, BushmanLab = degs_bushman, PID_C = degs_PID_C, PID_D = degs_PID_N)
+  # dataset <- dplyr::arrange(dataset, desc(COSMIC), desc(BushmanLab), desc(PID_C), desc(PID_D))
+}
+# add the gene lists
+genes_AA_ranked <- add_onco(genes_AA_ranked)
+genes_BB_ranked <- add_onco(genes_BB_ranked)
+genes_AB_ranked <- add_onco(genes_AB_ranked)
+genes_BA_ranked <- add_onco(genes_BA_ranked)
+
+genes_all_ranked <- add_onco(genes_all_ranked)
+```
+
+# Save the data
+
+Save the gene lists with differential eigenvector values sorted, will be used in GSEA analysis 
+
+```{r}
+# Write out AB and BA gene/compartment data to Xcel spreadsheets
+if (rerun) {
+  x <- c(list(GenesAA = genes_AA_ranked), list(GenesBB = genes_BB_ranked), list(GenesAB = genes_AB_ranked), list(GenesBA = genes_BA_ranked), list(GenesAll = genes_all_ranked), list(Summary = AB_summary), list(EVs_and_Compartments = AB_conditions_assigned), list(RLE = ABrun_all))
+  write_xlsx(x, path = fileNameOut1)
+}
+```
+
+
+# Save BED files
+
+The following format will use colors, https://www.biostars.org/p/269367/
+
+```
+track itemRgb=On								
+chr1	1000	2000	AB	0	.	1000	2000	167,203,104
+chr1	1500	2500	BB	0	.	1000	2000	242,51,16
+```
+
+- "chr", "start", "end" - coordinates
+- "compartment" - type of AB compartment change
+- "padj - difference in compartments
+- "." - strand
+- "thickStart" and "thickEnd" 
+- RGB colors
+    - AA - red, 255,0,0
+    - AB - orange, 255,165,0
+    - BA - light purple, 158,121,240
+    - BB - blue, 0,0,255
+
+```{r}
+x <- data.frame(chr        = AB_conditions_assigned$PRchr,
+                start      = AB_conditions_assigned$PRstart,
+                end        = AB_conditions_assigned$PRend,
+                name       = AB_conditions_assigned$compartment,
+                score      = -log10(AB_conditions_assigned$padj),
+                strand     = ".",
+                thickStart = AB_conditions_assigned$PRstart,
+                thickEnd   = AB_conditions_assigned$PRend,
+                color = ifelse(AB_conditions_assigned$compartment == "AA", "255,0,0",
+                               ifelse(AB_conditions_assigned$compartment == "AB", "255,165,0",
+                                      ifelse(AB_conditions_assigned$compartment == "BA", "158,121,240",
+                                             ifelse(AB_conditions_assigned$compartment == "BB", "0,0,255", ""))))
+)
+# Keep full numbers
+x$start <- format(x$start, scientific = FALSE, trim = TRUE, justify = "none")
+x$end   <- format(x$end, scientific = FALSE, trim = TRUE, justify = "none")
+x$thickStart <- format(x$thickStart, scientific = FALSE, trim = TRUE, justify = "none")
+x$thickEnd   <- format(x$thickEnd, scientific = FALSE, trim = TRUE, justify = "none")
+# Append header
+x <- rbind(c("track itemRgb=On", rep("", ncol(x) - 1)), x)
+# Save the BED file
+if (rerun) {
+  fwrite(round_df(x), file = fileNameOut2, quote = FALSE, sep = "\t", row.names = FALSE, col.names = FALSE)
+}
+```
+
+## Summary and EV file
+
+**Summary:** Summary of per chromosome statistics. "chr"- chromosome number. "PT_A" - Percent of chromosome in A compartment in primary tumor dataset. "PT_B" - Percent of chromosome in A compartment in primary tumor dataset. "CR_A" - Percent of chromosome in A compartment in CR dataset. "CR_B" - Percent of chromosome in A compartment in CR dataset. "Percent_AA", "Percent_BB", "Percent_AB", and "Percent_BA" - percent of each chromosome that is in one of the four compartment switches between the two datasets. "AB_min", "AB_mean", "AB_max" - Min mean and max length of AB compartment per chromosome. "BA_min", "BA_mean", "BA_max" - Min mean and max length of BA compartment per chromosome. 
+
+**EVs_and_Compartments** A summary of regions on each chromosome and their associated EV and compartment. For both PR and CR datasets. "PRchr" - chromosome in PR data. "PRstart" - start coordinates of the region in PR dataset. "PRend" end coordinate of the region in the PR data. "PREV" EV for the region in PR data. "compartment" Either A or B, the assigned compartment for the region. "CRchr" - chromosome in CR data. "CRstart" - start coordinates of the region in CR dataset. "CRend" end coordinate of the region in the CR data. "CREV" EV for the region in CR data. "compartment" Either A or B, the assigned compartment for the region. "D.EV" the difference in the EV between datasets. Determined by CREV - PREV. "switch" whether the region switched from A to A (AA), A to B (AB), A to A (AA), or B to B (BB).
+
+**RLE** - Summarizes the run length of regions and their associated switches. "lengths" - length of the run. "comparment" what compartment the region belongs to. "start" start coordinate of the region. "end" coordinate of the region. "chr" chromosome that the region belongs to.  
+
+# EDA of eigenvectors
+
+Independent code, for exploratory analysis of eigenvector concordance.
+
+```{r fig.height=2, fig.width=2}
+library(data.table)
+library(pheatmap)
+# Full dcHiC results, root folder
+dir_data <- "/Users/mdozmorov/Documents/Data/GoogleDrive/HiC_files/results/AB_compartments/dcHiC_2021-09-03/CR_PR_Dataset_250Kb"
+# bedGraph folders
+dir_bedGraph_PR <- file.path(dir_data, "PR_250Kb_pca/intra_pca/PR_250Kb_mat")
+dir_bedGraph_CR <- file.path(dir_data, "CR_250Kb_pca/intra_pca/CR_250Kb_mat")
+
+# Selected PCs
+pc_selected <- fread(file.path(dir_data, "chr_pc_selected.tsv"))
+pc_selected <- as.data.frame(pc_selected)
+# Discordant selection
+print("Discordant PC selection")
+kable(pc_selected[pc_selected$PR != pc_selected$CR, ])
+
+# bedGraph correlation for each chromosome
+chromosomes <- paste0("chr", c(1:22, "X"))
+pcs <- c("PC1", "PC2", "PC3")
+for (chr in chromosomes) {
+  print(paste("Selected:", pc_selected[pc_selected$chr == chr, ]))
+  mtx <- matrix(0, nrow = length(pcs), ncol = length(pcs))
+  for (i in 1:length(pcs)) {
+    for (j in 1:length(pcs))
+      if(i >= j) {
+        pc_PR <- fread(file.path(dir_bedGraph_PR, paste0(chr, ".", pcs[i], ".bedGraph")))
+        pc_CR <- fread(file.path(dir_bedGraph_CR, paste0(chr, ".", pcs[j], ".bedGraph")))
+        if (nrow(pc_PR) != nrow(pc_CR)) {
+          print(paste("Length mismatch:", chr, "PR", pcs[i], "CR", pcs[j]))
+        } else {
+          mtx[i, j] <- mtx[j, i] <- cor(pc_PR$V4, pc_CR$V4)
+        }
+      }
+  }
+  colnames(mtx) <- rownames(mtx) <- paste(chr, pcs, sep = ".")
+  pheatmap(mtx, display_numbers = TRUE, cluster_cols = FALSE, cluster_rows = FALSE, legend = FALSE, treeheight_col = 0, treeheight_row = 0)
+}
+```
+

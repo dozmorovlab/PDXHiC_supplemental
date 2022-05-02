@@ -1,0 +1,502 @@
+---
+title: "dcHi-C genes analysis"
+author: "Mikhail Dozmorov"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: cerulean
+    toc: yes
+  pdf_document:
+    toc: no
+---
+
+```{r setup, echo=FALSE, message=FALSE, warning=FALSE}
+# Set up the environment
+library(knitr)
+opts_chunk$set(cache.path='cache/', fig.path='img/', cache=F, tidy=T, fig.keep='high', echo=F, dpi=100, warnings=F, message=F, comment=NA, warning=F, results='as.is', fig.width = 10, fig.height = 6) #out.width=700, 
+library(pander)
+panderOptions('table.split.table', Inf)
+set.seed(1)
+library(dplyr)
+options(stringsAsFactors = FALSE)
+```
+
+# Libraries
+
+```{r libraries}
+library(readxl)
+library(readr)
+library(reshape2)
+library(ggplot2)
+library(ggrepel)
+library(RColorBrewer)
+library(VennDetail)
+library(annotables)
+library("ggsci")
+library(scales)
+# scales::show_col(pal_lancet("lanonc")(8))
+mycols = pal_lancet("lanonc")(8)
+library(patchwork)
+```
+
+# Settings
+
+```{r}
+# General settings
+# Cutoff for significant AB compartment changes
+padj_compartment_cutoff <- 0.3
+# Cutoff for significant KEGG enrichment
+padj_kegg_cutoff <- 1
+# Cutoff for significant MSigDb enrichment
+padj_msigdb_cutoff <- 0.05
+```
+```{r}
+# dcHiC_2021-09-03 analysis settings
+# Mikhail's path 
+# dir_data <- "/Users/mdozmorov/Documents/Data/GoogleDrive/HiC_files/results/AB_compartments/dcHiC_2021-09-03"
+# fileNameIn1 <- "differential.intra_sample_group.Filtered.bedGraph" # Filtered results
+# fileNameIn2 <- "differential.intra_sample_group.bedGraph" # Full results
+# dcHiC_2021-12-03 analysis settings
+dir_data <- "/Users/mdozmorov/Documents/Data/GoogleDrive/HiC_files/results/AB_compartments/dcHiC_2021-12-03/"
+fileNameIn2 <- "CR_vs_PR_After_PC_Reselction_PR_chr3_PC1/viz/files/intra_compartment.bedGraph" # Full results
+# Resolution
+res_number <- 250000
+res_text <- "250kb"
+# Results folder
+# Mikhail's path 
+dir_results <- file.path(dir_data, "results")
+# Maggie's path 
+dir.create(dir_results, recursive = TRUE) # Create if does not exist
+fileNameIn1 <- file.path(dir_results, paste0("AB_gene_summary_", res_text,"_", padj_compartment_cutoff, ".xlsx"))
+
+# Figures
+fileNameOut1 <- file.path(dir_results, "UCD52PRCR_AA_RNAseq.svg")
+fileNameOut2 <- file.path(dir_results, "UCD52PRCR_BB_RNAseq.svg")
+fileNameOut3 <- file.path(dir_results, "UCD52PRCR_AB_RNAseq.svg")
+fileNameOut4 <- file.path(dir_results, "UCD52PRCR_BA_RNAseq.svg")
+fileNameOut5 <- file.path(dir_results, "UCD52PRCR_all_RNAseq.svg")
+fileNameOut6 <- file.path(dir_results, "UCD52PRCR_ABC_RNAseq.svg")
+```
+
+```{r settings}
+# Differentially expressed genes
+# Single-cell data
+# fileNameIn3 <- "/Users/mdozmorov/Documents/Data/GoogleDrive/HiC_files/scRNA-seq/DEGs_0.1_three.xlsx"
+# Microarray publication
+# fileNameIn3 <- "/Users/mdozmorov/Documents/Data/GoogleDrive/HiC_files/results/RNA-seq/RNA-seq_2019/UCD52_Human_MGT_vs_LiverMet.xlsx"
+# Bulk UCD52CR vs PR
+fileNameIn3 <- "/Users/mdozmorov/Documents/Data/GoogleDrive/HiC_files/results/RNA-seq/2021.11.19_UCD52_DEG/results/DEGs_edgeR_UCD52PR_CR_annotated.xlsx"
+
+# Gene annotations
+gene_annotations <- grch38[ !(grepl("_", grch38$chr) | grepl("GL", grch38$chr)), c("ensgene", "symbol", "biotype", "description")]
+gene_annotations <- gene_annotations[ !duplicated(gene_annotations) & !is.na(gene_annotations$symbol) & gene_annotations$description != "", ]
+```
+
+# Load data
+
+```{r data}
+# Compartment data
+mtx_full <- read_tsv(file.path(dir_data, fileNameIn2)) # Full
+# Process compartment data
+mtx_filtered <- mtx_full[mtx_full$padj <= padj_compartment_cutoff, ]
+mtx_filtered$compartment <- ifelse(mtx_filtered$PR > 0 & mtx_filtered$CR > 0, "AA", 
+                                   ifelse(mtx_filtered$PR <= 0 & mtx_filtered$CR <= 0, "BB",
+                                          ifelse(mtx_filtered$PR > 0 & mtx_filtered$CR <= 0, "AB", "BA")))
+
+# Genes data
+genes_AA_full <- read_xlsx(fileNameIn1, sheet = 1)
+genes_BB_full <- read_xlsx(fileNameIn1, sheet = 2)
+genes_AB_full <- read_xlsx(fileNameIn1, sheet = 3)
+genes_BA_full <- read_xlsx(fileNameIn1, sheet = 4)
+genes_all_full <- read_xlsx(fileNameIn1, sheet = 5)
+# Process gene data
+genes_AA <- unique(genes_AA_full$genes)
+genes_BB <- unique(genes_BB_full$genes)
+genes_AB <- unique(genes_AB_full$genes)
+genes_BA <- unique(genes_BA_full$genes)
+
+# DEGs data
+degs_full <- read_xlsx(fileNameIn3, skip = 2)
+# Filter significant
+degs <- degs_full[degs_full$FDR < padj_msigdb_cutoff, ]
+# Process DEGs data
+degs_UP <- degs$genes[degs$logFC > 0]
+degs_DN <- degs$genes[degs$logFC <= 0]
+```
+
+# Genes and AB compartment change stats
+
+```{r fig.height=2}
+compartment_gene_summary <- as.data.frame(table(mtx_filtered$compartment))
+colnames(compartment_gene_summary) <- c("Type", "Compartment")
+compartment_gene_summary$Gene <- c(length(genes_AA), length(genes_AB), length(genes_BA), length(genes_BB))
+pander(compartment_gene_summary)
+
+compartment_gene_summary_long <- melt(compartment_gene_summary, id = "Type")
+colnames(compartment_gene_summary_long) <- c("Switch", "Type", "Number")
+
+# display.brewer.pal(7, "Spectral")
+# brewer.pal(7, "Spectral")
+# ggplot(compartment_gene_summary_long, aes(x = Type, y = Number, group = Switch)) +
+#   geom_bar(stat = "identity", position = "dodge", aes(fill = Switch)) +
+#   theme_bw() +
+#   scale_fill_manual(values = mycols[1:4])  +
+#   facet_wrap(Type ~ .)
+
+p1 <- ggplot(compartment_gene_summary_long %>% filter(Type == "Compartment"), aes(x = Switch, y = Number, group = Switch)) +
+  geom_bar(stat = "identity", position = "dodge", aes(fill = Switch)) +
+  theme_bw() +
+  scale_fill_manual(values = mycols[1:4])  +
+  ggtitle("Compartment switch counts")
+
+p2 <- ggplot(compartment_gene_summary_long %>% filter(Type == "Gene"), aes(x = Switch, y = Number, group = Switch)) +
+  geom_bar(stat = "identity", position = "dodge", aes(fill = Switch)) +
+  theme_bw() +
+  scale_fill_manual(values = mycols[c(1, 3, 2, 4)])  +
+  ggtitle("Overlapping gene counts")
+
+p1 + p2
+ggsave(paste0("../manuscript/figures/dcHiC_genes_", padj_compartment_cutoff, ".svg"), width = 6, height = 2)
+```
+
+# Gene overlap
+
+```{r}
+ven <- venndetail(list(AA = genes_AA, BB = genes_BB, AB = genes_AB, BA = genes_BA))
+plot(ven, type = "upset")
+```
+
+## Genes in BB and BA
+
+```{r}
+left_join(data.frame(symbol = getSet(ven, subset = "BB_BA")$Detail %>% sort),
+          gene_annotations, by = c("symbol")) %>% dplyr::select(c("symbol", "biotype", "description")) %>% pander
+```
+
+## Genes in BB and AB
+
+```{r}
+left_join(data.frame(symbol = getSet(ven, subset = "BB_AB")$Detail %>% sort),
+          gene_annotations, by = c("symbol")) %>% dplyr::select(c("symbol", "biotype", "description")) %>% pander
+```
+
+## Genes in AA and BB
+
+```{r}
+left_join(data.frame(symbol = getSet(ven, subset = "AA_BB")$Detail %>% sort),
+          gene_annotations, by = c("symbol")) %>% dplyr::select(c("symbol", "biotype", "description")) %>% pander
+```
+
+## Genes in AA and BA
+
+```{r}
+left_join(data.frame(symbol = getSet(ven, subset = "AA_BA")$Detail %>% sort),
+          gene_annotations, by = c("symbol")) %>% dplyr::select(c("symbol", "biotype", "description")) %>% pander
+```
+
+## Genes in AA and AB
+
+```{r}
+left_join(data.frame(symbol = getSet(ven, subset = "AA_AB")$Detail %>% sort),
+          gene_annotations, by = c("symbol")) %>% dplyr::select(c("symbol", "biotype", "description")) %>% pander
+```
+
+# Overlap with DEGs
+
+## Upregulated genes
+
+```{r}
+print(paste("Total upregulated:", length(degs_UP)))
+# Intersect with 
+ven <- venndetail(list(AA = genes_AA, BB = genes_BB, AB = genes_AB, BA = genes_BA, UP = degs_UP))
+print(paste("Upregulated, no overlap with AB compartment change:", length(getSet(ven, subset = "UP")$Detail)))
+# Table summary of overlaps
+ven_summary <- table(result(ven)$Subset) %>% as.data.frame()
+colnames(ven_summary) <- c("Subset", "Number")
+# Compartments overlapping with DEGs
+ven_summary[grepl("_UP", ven_summary$Subset), ] %>% pander()
+
+left_join(getSet(ven, subset = ven_summary$Subset[grepl("_UP", ven_summary$Subset)]), 
+          gene_annotations, by = c("Detail" = "symbol")) %>% dplyr::select(c("Subset", "Detail", "biotype", "description")) %>% pander
+```
+
+## Downregulated genes
+
+```{r}
+print(paste("Total downregulated:", length(degs_DN)))
+# Intersect with 
+ven <- venndetail(list(AA = genes_AA, BB = genes_BB, AB = genes_AB, BA = genes_BA, DN = degs_DN))
+print(paste("Downregulated, no overlap with AB compartment change:", length(getSet(ven, subset = "DN")$Detail)))
+# Table summary of overlaps
+ven_summary <- table(result(ven)$Subset) %>% as.data.frame()
+colnames(ven_summary) <- c("Subset", "Number")
+# Compartments overlapping with DEGs
+ven_summary[grepl("_DN", ven_summary$Subset), ] %>% pander()
+
+left_join(getSet(ven, subset = ven_summary$Subset[grepl("_DN", ven_summary$Subset)]), 
+          gene_annotations, by = c("Detail" = "symbol")) %>% dplyr::select(c("Subset", "Detail", "biotype", "description")) %>% pander
+```
+
+# Correlations
+
+Exploratory analysis. Expectation is that changes in eigenvectors ("D.EV") would correlate with changes in gene expression ("log2FoldChange"). And, it will hold for any compartment change
+
+## AA
+
+```{r fig.height=4, fig.width=5}
+DEGs_compartment <- left_join(genes_AA_full[, c("genes", "D.EV")], degs_full[, c("genes", "logFC")], by = c("genes"))
+DEGs_compartment <- DEGs_compartment[complete.cases(DEGs_compartment), ]
+ggplot(DEGs_compartment, aes(y = D.EV, x = logFC, color = logFC)) +
+  geom_point(size=2) +
+  scale_color_gradient(low = "green", high = "red") +
+  geom_smooth(method = "lm", se = FALSE) +
+  theme_classic() +
+  theme(legend.position = "none") +
+  ggtitle("dcHiC AA vs. expression changes")
+# Calculate correlation
+res <- Hmisc::rcorr(DEGs_compartment$D.EV, DEGs_compartment$logFC)
+print(paste("Pearson correlation:", round(res$r[1, 2], digits = 3), "P-value", formatC(res$P[1, 2], format = "e", digits = 3) ))
+ggsave(fileNameOut1, width = 3.5, height = 3.5)
+```
+
+## BB
+
+```{r fig.height=4, fig.width=5}
+DEGs_compartment <- left_join(genes_BB_full[, c("genes", "D.EV")], degs_full[, c("genes", "logFC")], by = c("genes"))
+DEGs_compartment <- DEGs_compartment[complete.cases(DEGs_compartment), ]
+ggplot(DEGs_compartment, aes(y = D.EV, x = logFC, color = logFC)) +
+  geom_point(size=2) +
+  scale_color_gradient(low = "green", high = "red") +
+  geom_smooth(method = "lm", se = FALSE) +
+  theme_classic() +
+  theme(legend.position = "none") +
+  ggtitle("dcHiC BB vs. expression changes")
+# Calculate correlation
+res <- Hmisc::rcorr(DEGs_compartment$D.EV, DEGs_compartment$logFC)
+print(paste("Pearson correlation:", round(res$r[1, 2], digits = 3), "P-value", formatC(res$P[1, 2], format = "e", digits = 3) ))
+ggsave(fileNameOut2, width = 3.5, height = 3.5)
+```
+
+## AB
+
+```{r fig.height=4, fig.width=5}
+DEGs_compartment <- left_join(genes_AB_full[, c("genes", "D.EV")], degs_full[, c("genes", "logFC")], by = c("genes"))
+DEGs_compartment <- DEGs_compartment[complete.cases(DEGs_compartment), ]
+ggplot(DEGs_compartment, aes(y = D.EV, x = logFC, color = logFC)) +
+  geom_point(size=2) +
+  scale_color_gradient(low = "green", high = "red") +
+  geom_smooth(method = "lm", se = FALSE) +
+  theme_classic() +
+  theme(legend.position = "none") +
+  ggtitle("dcHiC AB vs. expression changes")
+# Calculate correlation
+res <- Hmisc::rcorr(DEGs_compartment$D.EV, DEGs_compartment$logFC)
+print(paste("Pearson correlation:", round(res$r[1, 2], digits = 3), "P-value", formatC(res$P[1, 2], format = "e", digits = 3) ))
+ggsave(fileNameOut3, width = 3.5, height = 3.5)
+```
+
+## BA
+
+```{r fig.height=4, fig.width=5}
+DEGs_compartment <- left_join(genes_BA_full[, c("genes", "D.EV")], degs_full[, c("genes", "logFC")], by = c("genes"))
+DEGs_compartment <- DEGs_compartment[complete.cases(DEGs_compartment), ]
+ggplot(DEGs_compartment, aes(y = D.EV, x = logFC, color = logFC)) +
+  geom_point(size=2) +
+  scale_color_gradient(low = "green", high = "red") +
+  geom_smooth(method = "lm", se = FALSE) +
+  theme_classic() +
+  theme(legend.position = "none") +
+  ggtitle("dcHiC BA vs. expression changes")
+# Calculate correlation
+res <- Hmisc::rcorr(DEGs_compartment$D.EV, DEGs_compartment$logFC)
+print(paste("Pearson correlation:", round(res$r[1, 2], digits = 3), "P-value", formatC(res$P[1, 2], format = "e", digits = 3) ))
+ggsave(fileNameOut4, width = 3.5, height = 3.5)
+```
+
+## All
+
+```{r fig.height=4, fig.width=5}
+# Collapse all genes by max 
+genes_all_full_selected <- genes_all_full[, c("genes", "D.EV")]
+maxabs <- function (x) max(abs(x))
+genes_all_full_selected <- aggregate(genes_all_full_selected$D.EV, by = list(genes_all_full_selected$genes), "max")
+colnames(genes_all_full_selected) <- c("genes", "D.EV") 
+
+DEGs_compartment <- left_join(genes_all_full_selected, degs_full[, c("genes", "logFC")], by = c("genes"))
+# DEGs_compartment <- DEGs_compartment[abs(DEGs_compartment$logFC) > 2, ]
+DEGs_compartment <- DEGs_compartment[complete.cases(DEGs_compartment), ]
+ggplot(DEGs_compartment, aes(y = D.EV, x = logFC, color = logFC)) +
+  geom_point(size=2) +
+  scale_color_gradient(low = "green", high = "red") +
+  geom_smooth(method = "lm", se = FALSE) +
+  theme_classic() +
+  theme(legend.position = "none") +
+  ggtitle("dcHiC all vs. expression changes")
+# Calculate correlation
+res <- Hmisc::rcorr(DEGs_compartment$D.EV, DEGs_compartment$logFC)
+print(paste("Pearson correlation:", round(res$r[1, 2], digits = 3), "P-value", formatC(res$P[1, 2], format = "e", digits = 3) ))
+
+# Remove unchanged genes with logFC +/- 1SD
+dcHiC_D.EV_threshold <- sd(DEGs_compartment$D.EV)
+Differential_expression_log2FC_threshold <- sd(DEGs_compartment$logFC)
+DEGs_compartment_filtered <- DEGs_compartment %>% dplyr::filter(abs(D.EV) > dcHiC_D.EV_threshold & abs(logFC) > Differential_expression_log2FC_threshold)
+
+ggplot(DEGs_compartment_filtered, aes(y = D.EV, x = logFC, color = logFC)) +
+  geom_point(size=2, size = 3) +
+  scale_color_gradient(low = "green", high = "red") +
+  geom_smooth(method = "lm", se = FALSE) + # , max.overlaps = 10
+  theme_classic() +
+  theme(legend.position = "none") +
+  ggtitle("dcHiC all vs. expression changes")
+ggsave(fileNameOut5, width = 3.5, height = 3.5)
+# Calculate correlation
+res <- Hmisc::rcorr(DEGs_compartment_filtered$D.EV, DEGs_compartment_filtered$logFC)
+print(paste("Pearson correlation:", round(res$r[1, 2], digits = 3), "P-value", formatC(res$P[1, 2], format = "e", digits = 3) ))
+```
+
+## ABC transporters only
+
+```{r}
+# Collapse all genes by max 
+genes_all_full_selected <- genes_all_full[, c("genes", "D.EV")]
+maxabs <- function (x) max(abs(x))
+genes_all_full_selected <- aggregate(genes_all_full_selected$D.EV, by = list(genes_all_full_selected$genes), "max")
+colnames(genes_all_full_selected) <- c("genes", "D.EV") 
+
+DEGs_compartment <- left_join(genes_all_full_selected, degs_full[, c("genes", "logFC")], by = c("genes"))
+# DEGs_compartment <- DEGs_compartment[abs(DEGs_compartment$logFC) > 2, ]
+DEGs_compartment <- DEGs_compartment[complete.cases(DEGs_compartment), ]
+ggplot(DEGs_compartment[grepl("^ABC", DEGs_compartment$genes), ], aes(y = D.EV, x = logFC, color = logFC, label = genes)) +
+  geom_point(size=2) +
+  geom_text_repel(colour = "black", size = 3) +
+  scale_color_gradient(low = "green", high = "red") +
+  geom_smooth(method = "lm", se = FALSE) +
+  theme_classic() +
+  theme(legend.position = "none") +
+  ggtitle("dcHiC vs. ABC transporter expression")
+ggsave(fileNameOut6, width = 3.5, height = 3.5)
+# Calculate correlation
+res <- Hmisc::rcorr(DEGs_compartment$D.EV[grepl("^ABC", DEGs_compartment$genes)], DEGs_compartment$logFC[grepl("^ABC", DEGs_compartment$genes)])
+print(paste("Pearson correlation:", round(res$r[1, 2], digits = 3), "P-value", formatC(res$P[1, 2], format = "e", digits = 3) ))
+
+```
+
+
+# Pathview
+
+```{r eval = FALSE}
+library(pathview)
+OrgDb <- "org.Hs.eg.db"
+species <- "hsa"
+# Differentially expressed genes
+degs <- data.frame(genes = genes_all_full$genes, logFC = genes_all_full$D.EV)
+# Convert to EntrezID
+degs.eg <-clusterProfiler::bitr(degs$genes, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = OrgDb)
+degs <- left_join(degs, degs.eg, by = c("genes" = "SYMBOL"))
+degs <- degs[!is.na(degs$ENTREZID), ]
+degs <- aggregate(x = degs$logFC, by = list(degs$ENTREZID), FUN = max )
+colnames(degs) <- c("ENTREZID", "logFC")
+# Construct vector of FCs
+degs.genes <- degs$logFC
+names(degs.genes) <- degs$ENTREZID
+
+# hsa00350	Tyrosine metabolism
+# kegg_ids <- data.frame(ID = c("00350", "05217", "00980", "00982"),
+#                        Description = c("Tyrosine metabolism", "Basal cell carcinoma", "Metabolism of xenobiotics by cytochrome P450", "Drug metabolism - cytochrome P450"))
+kegg_ids <- read_xlsx("/Users/mdozmorov/Documents/Data/GoogleDrive/HiC_files/results/AB_compartments/dcHiC_2021-12-03/results/AB_gene_enrichment_250kb_0.3.xlsx", sheet = "GSEA.KEGG.ALL")
+
+j <- 0
+# Cycle through each KEGG ID
+for (i in 1:nrow(kegg_ids)) {
+  print(kegg_ids$Description[i])
+  # Get KEGG pathway and overlay DEGs
+  pathview(gene.data = degs.genes, pathway.id = as.character(kegg_ids$ID[i]), species = species, gene.idtype = "ENTREZ", gene.annotpkg = OrgDb, out.suffix = make.names(kegg_ids$Description[i]))
+  # Rename PNG file
+  fileNamePngIn  <- paste0(kegg_ids$ID[i], ".", make.names(kegg_ids$Description[i]), ".png")
+  fileNamePngOut <- paste0(formatC(j, format="g", digits=2, flag = "0"), ".", kegg_ids$ID[i], ".", make.names(kegg_ids$Description[i]), ".png")
+  system(paste0("mv ", fileNamePngIn, " ", fileNamePngOut))
+  j <- j + 1 # Increase counter
+  system(paste0("rm ", kegg_ids$ID[i], ".*")) # Clean up temporary files
+}
+# brew install imagemagick
+system(paste0("convert ", "*", species, "*.png ", "WGS/results/pathways_dcHiC.pdf")) # Combine PNGs into one PDF
+system(paste0("rm ", "*", species, "*.png")) 
+```
+
+## Selected
+
+```{r eval=FALSE}
+library(pathview)
+library(readxl)
+library(clusterProfiler)
+library(dplyr)
+OrgDb <- "org.Hs.eg.db"
+species <- "hsa"
+
+dir_data <- "/Users/mdozmorov/Documents/Data/GoogleDrive/HiC_files/results/AB_compartments/dcHiC_2021-12-03/"
+fileNameIn1 <- file.path(dir_data, "results/AB_gene_summary_250kb_1.xlsx")
+# All genes ranked by eigenvector differences
+res <- read_xlsx(fileNameIn1, sheet = "GenesAll")
+degs <- data.frame(genes = res$genes, logFC = res$D.EV)
+# Convert to EntrezID
+degs.eg <-clusterProfiler::bitr(degs$genes, fromType = "SYMBOL", toType = "ENTREZID", OrgDb = OrgDb)
+degs <- left_join(degs, degs.eg, by = c("genes" = "SYMBOL"))
+degs <- degs[!is.na(degs$ENTREZID), ]
+degs <- aggregate(x = degs$logFC, by = list(degs$ENTREZID), FUN = max )
+colnames(degs) <- c("ENTREZID", "logFC")
+# Construct vector of FCs
+degs.genes <- degs$logFC
+names(degs.genes) <- degs$ENTREZID
+
+kegg_names = c("ABC transporters",
+"Adherens junction",
+"Breast cancer", # hsa05224
+"Cell cycle",
+"Drug metabolism - cytochrome P450",
+"Estrogen signaling pathway", 
+"Focal adhesion",
+"Hedgehog signaling pathway",
+"mTOR signaling pathway",
+"p53 signaling pathway",
+"Pathways in cancer",
+"PI3K-Akt signaling pathway",
+"Ras signaling pathway",
+"Ribosome biogenesis in eukaryotes",
+"Ribosome", 
+"TGF-beta signaling pathway",
+"TNF signaling pathway", 
+"Toll-like receptor signaling pathway", 
+"Wnt signaling pathway", 
+"Chemical carcinogenesis",
+"Metabolism of xenobiotics by cytochrome P450",
+"Oxidative phosphorylation")
+
+xx <- paths.hsa  # Text to ID mapping dataset
+setdiff(kegg_names, xx) # Names that did not map
+# Google and Manually map unmapped IDs
+# xx[grep("Alzheimer", xx, ignore.case = TRUE)]
+kegg_unmapped <- c("05224") # Manually map unmapped ones
+# kegg_unmapped <- NULL # Use if all mapped
+kegg_ids <- c(names(xx)[xx %in% kegg_names]) # All KEGG IDs
+kegg_ids <- kegg_ids[match(kegg_names, xx[xx %in% kegg_names])] # Match name order
+kegg_ids <- sub("hsa", "", kegg_ids) # Strip off "hsa"
+kegg_ids <- kegg_ids[!is.na(kegg_ids)] # Remove NAs
+kegg_ids <- c(kegg_ids, kegg_unmapped) # Attach unmapped
+
+j <- 0
+# Cycle through each KEGG ID
+for (i in 1:length(kegg_ids)) {
+  # Get KEGG pathway and overlay DEGs
+  pathview(gene.data = degs.genes, pathway.id = as.character(kegg_ids[i]), species = species, gene.idtype = "ENTREZ", gene.annotpkg = OrgDb, out.suffix = "selected")
+  # Rename PNG file
+  fileNamePngIn  <- paste0(species, kegg_ids[i], ".selected.png")
+  fileNamePngOut <- paste0(formatC(j, format="g", digits=2, flag = "0"), ".", species, kegg_ids[i], ".", make.names(kegg_ids[i]), ".png")
+  system(paste0("mv ", fileNamePngIn, " ", fileNamePngOut))
+  j <- j + 1 # Increase counter
+  system(paste0("rm ", species, kegg_ids[i], ".*")) # Clean up temporary files
+}
+# brew install imagemagick
+system(paste0("convert ", "*.", species, "*.png ", file.path(dir_data, "results/pathways_dcHiC_selected.pdf"))) # Combine PNGs into one PDF
+system(paste0("rm ", "*.", species, "*.png")) 
+```
+
