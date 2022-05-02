@@ -1,5 +1,10 @@
 # Whole Genome Sequencing coverage differences between the CR and PR conditions
 
+<!-- /Users/mdozmorov/Documents/mount/juicer/Mikhail/WGS/submit06_bamcompare.sh -->
+- `submit06_bamcompare.sh` - convert BAM files to bigWig and compare them into log2ratio bigWig. Multiple resolutions, also convert to bedGraph
+    - Input: WGS condition-specific BAM files, deduplicated, sorted.
+    - Output: `UCD52CR_vs_PR_wgs_${RES}_log2ratio.bw` and condition-specific bw coverage files. Also, converted to bedGraph.
+
 <!-- /Users/mdozmorov/Documents/Work/GitHub/Katarzyna/PDXHiC/WGS/07_DNAcopy.Rmd -->
 - `07_DNAcopy.Rmd` - log2ratio segmentation
     - Input: bigWig files `UCD52CR_vs_PR_hic_10kb_log2ratio.bw` from either wgs or hic coverage folders
@@ -7,7 +12,7 @@
 
 <!-- /Users/mdozmorov/Documents/Data/GoogleDrive/HiC_files/results/WGS/submit08_htseq.sh -->
 - `submit08_htseq.sh` - Counting reads in genes
-    - Input: BAM files
+    - Input: WGS condition-specific BAM files, deduplicated, sorted. `gencode.v39.annotation.gtf`
     - Output: `UCD52PR.txt`, `UCD52CR.txt` gene counts
 
 <!-- /Users/mdozmorov/Documents/Work/GitHub/Katarzyna/PDXHiC/WGS/09_gene_coverage_diff_04.06.22.pdf -->
