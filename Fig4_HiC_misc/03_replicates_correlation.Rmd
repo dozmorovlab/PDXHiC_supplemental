@@ -1,0 +1,205 @@
+---
+title: "Correlation analysis of individual replicates"
+author: "Mikhail Dozmorov"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: no
+  html_document:
+    theme: cerulean
+    toc: yes
+---
+
+```{r setup, echo=FALSE, message=FALSE, warning=FALSE}
+# Set up the environment
+library(knitr)
+opts_chunk$set(cache.path = "cache/", fig.path = "img/", cache = F, tidy = T, fig.keep = "high", echo = F, dpi = 100, warnings = F, message = F, comment = NA, warning = F, results = "as.is", fig.width = 10, fig.height = 6) # out.width=700,
+library(pander)
+panderOptions("table.split.table", Inf)
+set.seed(1)
+library(dplyr)
+options(stringsAsFactors = FALSE)
+```
+
+# Libraries
+
+```{r libraries}
+# library(HiCcompare)
+library(readr)
+library(pheatmap)
+library(ggpubr)
+```
+
+# Settings
+
+```{r settings, echo=TRUE}
+# Data resolution, name of the subfolder
+resolution <- "M1" # 1Mb
+# resolution <- "K100" # 100kb
+# Average by mean or median
+# average_by <- "median"
+average_by <- "mean"
+
+# Script folder
+work_dir <- "/Users/mdozmorov/Documents/Work/GitHub/Katarzyna/PDXHiC"
+
+# Data folder, switch between Arima and PhRMA, match with Annotation file
+# data_dir <- file.path("/Users/mdozmorov/Documents/Data/PhRMA/PDXproject_analysis/02.Arima_replicates_straw", resolution)
+data_dir <- file.path("/Users/mdozmorov/Documents/Data/PhRMA/PDXproject_analysis/02.Phase_replicates_straw", resolution)
+# Annotation file, switch between Arima and PhRMA, match with Data folder
+# annotation_file <- file.path(work_dir, "data/Dozmorov_Arima.csv")
+annotation_file <- file.path(work_dir, "data/Dozmorov_samples_04.23.2019.csv")
+```
+
+# Get correlation data
+
+As a matrix of lists with chromosome-specific Pearson correlations
+
+```{r}
+# All sample folders
+sample_dirs <- list.dirs(data_dir, full.names = FALSE, recursive = FALSE)
+# Matrix to keep all correlations
+corr_all_data <- matrix(list(), nrow = length(sample_dirs), ncol = length(sample_dirs))
+# Go through each pair
+for (i in 1:length(sample_dirs)) {
+  for (j in 1:length(sample_dirs)) {
+    # If the same matrix, correlation is 1
+    if (i == j) {
+      corr_all_data[i, j] <- 1
+    }
+    # Only go through one half of the pairwise interactions
+    if (j > i) {
+      # Files for each sample
+      sample_files1 <- list.files(path = file.path(data_dir, sample_dirs[i]), full.names = FALSE)
+      sample_files2 <- list.files(path = file.path(data_dir, sample_dirs[j]), full.names = FALSE)
+      # Chromosomes for each sample
+      chrom1 <- sapply(sample_files1, function(x) strsplit(x, "_")[[1]][2], USE.NAMES = FALSE)
+      chrom2 <- sapply(sample_files2, function(x) strsplit(x, "_")[[1]][2], USE.NAMES = FALSE)
+      # Check if the number of files and the order of chromosomes are the same
+      if (!(all.equal(chrom1, chrom2))) {
+        print("Chromosome-specific files are not the same!")
+        break
+      }
+      # A vector to store correlations for all chromosomes
+      sample_corr <- c()
+      # After ensuring order is the same, go through each pair of files
+      for (s in 1:length(sample_files1)) {
+        mtx1 <- read_tsv(file.path(data_dir, sample_dirs[i], sample_files1[s]), col_names = FALSE, col_types = c("iii"))
+        mtx2 <- read_tsv(file.path(data_dir, sample_dirs[j], sample_files2[s]), col_names = FALSE, col_types = c("iii"))
+        # Proceed only if sufficient number of rows
+        if (nrow(mtx1) > 1 & nrow(mtx2) > 1) {
+          # Join matrices
+          hic.table <- inner_join(mtx1, mtx2, by = c("X1", "X2"))
+          colnames(hic.table) <- c("start", "end", "IF1", "IF2")
+          # Collect chromosome-specific correlations
+          sample_corr <- c(sample_corr, cor(hic.table[, "IF1"], hic.table[, "IF2"], method = "pearson"))
+        }
+      }
+      # Average correlation
+      corr_all_data[i, j] <- corr_all_data[j, i] <- list(sample_corr)
+    }
+  }
+}
+# Add column and row names
+rownames(corr_all_data) <- colnames(corr_all_data) <- sample_dirs
+```
+
+```{r eval=FALSE}
+# Save/load the data
+fileNameOut <- paste0("data/Figure_02_Arima_replicates_correlation_full_", resolution, ".csv")
+write_csv(as.data.frame(corr_all_data), file.path(work_dir, fileNameOut))
+# corr_all_data <- read_csv(file.path(work_dir, "data/Figure_02_Arima_replicates_correlation_full.csv")) %>% as.matrix()
+# rownames(corr_all_data) <- colnames(corr_all_data)
+```
+
+# Get sample annotations
+
+```{r}
+# Annotation
+sample_annotation <- read_csv(annotation_file, col_types = c("ccccc"))
+# Check for concordance, "100994" is excluded
+setdiff(sample_annotation$ID, sample_dirs)
+setdiff(sample_dirs, sample_annotation$ID)
+# Match order
+sample_annotation <- sample_annotation[match(rownames(corr_all_data), sample_annotation$ID), ]
+all.equal(rownames(corr_all_data), sample_annotation$ID)
+```
+
+```{r}
+# Summarize chromosome-specific correlations by either mean or median
+mtx_summarize <- function(x = corr_all_data, by = average_by) {
+  y <- matrix(0, nrow(x), ncol(x))
+  for (i in 1:nrow(x)) {
+    for (j in 1:nrow(y)) {
+      if (i == j) y[i, j] <- 1
+      if (j > 1) {
+        if (by == "mean") {
+          y[i, j] <- y[j, i] <- x[i, j] %>%
+            unlist() %>%
+            mean()
+        }
+        if (by == "median") {
+          y[i, j] <- y[j, i] <- x[i, j] %>%
+            unlist() %>%
+            median()
+        }
+      }
+    }
+  }
+  rownames(y) <- colnames(y) <- colnames(x)
+  y
+}
+
+mtx_to_plot <- mtx_summarize(x = corr_all_data, by = average_by)
+```
+
+# MDS
+
+```{r}
+mds <- cmdscale(d = (1 - mtx_to_plot)) %>% as_tibble()
+colnames(mds) <- c("Dim.1", "Dim.2")
+mds <- mds %>% mutate(groups = sample_annotation$Tumor)
+ggscatter(mds,
+  x = "Dim.1", y = "Dim.2",
+  label = paste(sample_annotation$Cell, sample_annotation$Tumor),
+  color = "groups",
+  size = 1,
+  repel = TRUE
+)
+```
+
+# Heatmap
+
+```{r}
+save_pheatmap_svg <- function(x, filename, width = 4.5, height = 3, units = "in", res = 300) {
+  stopifnot(!missing(x))
+  stopifnot(!missing(filename))
+  svg(filename, width = width, height = height)
+  grid::grid.newpage()
+  grid::grid.draw(x$gtable)
+  dev.off()
+}
+# Plotting
+mydf <- data.frame(
+  Cell = sample_annotation$Cell,
+  Tumor = sample_annotation$Tumor
+)
+rownames(mydf) <- sample_annotation$ID
+# All data
+clust_method <- "euclidean"
+# clust_method <- "correlation"
+x <- pheatmap(mtx_to_plot,
+  cluster_cols = T, cluster_rows = T,
+  clustering_method = "ward.D",
+  clustering_distance_rows = clust_method,
+  clustering_distance_cols = clust_method,
+  annotation_row = mydf, annotation_col = mydf,
+  main = "Arima replicates",
+  treeheight_row = 50,
+  treeheight_col = 50,
+  display_numbers = TRUE
+)
+
+# fileNameOut <- paste0("results/Figure_02_Arima_replicates_correlation_full_", resolution, ".svg")
+# save_pheatmap_svg(x, file.path(work_dir, fileNameOut), width = 6, height = 5)
+```
