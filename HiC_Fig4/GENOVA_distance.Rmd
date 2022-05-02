@@ -1,0 +1,143 @@
+---
+title: "GENOVA distance-dependent decay and differences"
+author: "Mikhail Dozmorov"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: no
+  html_document:
+    theme: cerulean
+    toc: yes
+---
+
+```{r setup, echo=FALSE, message=FALSE, warning=FALSE}
+# Set up the environment
+library(knitr)
+opts_chunk$set(cache.path='cache/', fig.path='img/', cache=F, tidy=T, fig.keep='high', echo=F, dpi=100, warnings=F, message=F, comment=NA, warning=F, results='as.is', fig.width = 10, fig.height = 6) #out.width=700, 
+library(pander)
+panderOptions('table.split.table', Inf)
+set.seed(1)
+library(dplyr)
+options(stringsAsFactors = FALSE)
+```
+
+# Libraries
+
+```{r libraries}
+library(GENOVA) # remotes::install_github("robinweide/GENOVA", ref = "dev")
+library(rCGH)
+library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+library(strawr) # remotes::install_github("aidenlab/straw/R")
+library(grid)
+library(gridExtra)
+library(ggplot2)
+library(ggsci)
+library(scales)
+# scales::show_col(pal_lancet("lanonc")(8))
+mycols = pal_lancet("lanonc")(8)
+```
+
+# Settings
+
+```{r settings}
+# .hic files, merged samples
+fileNamehic1 <- "/Users/mdozmorov/Documents/Data/GoogleDrive/HiC_files/03.Arima_samples_juicer/UCD52_PR/inter_30.hic"
+fileNamehic2 <- "/Users/mdozmorov/Documents/Data/GoogleDrive/HiC_files/03.Arima_samples_juicer/UCD52_CR/inter_30.hic"
+```
+```{r centromeres}
+# Centromeres from rCGH
+hg38_chrom <- hg38
+hg38_chrom$chrom[hg38_chrom$chrom == 23] <- "X"
+hg38_chrom$chrom[hg38_chrom$chrom == 24] <- "Y"
+centromeres <- hg38_chrom[, c("chrom", "centromerStart", "centromerEnd")]
+```
+
+# Load data
+
+## Juicer
+
+```{r juicer_samples, eval=TRUE}
+### Juicer, 100kb
+UCD52PR_100kb_juicer <- load_contacts(signal_path = fileNamehic1, sample_name = "PR",
+                                     resolution = 1e5,
+                                     balancing = TRUE, # KR by default
+                                     colour = "black")
+UCD52CR_100kb_juicer <- load_contacts(signal_path = fileNamehic2, sample_name = "CR",
+                                     resolution = 1e5,
+                                     balancing = TRUE, # KR by default
+                                     colour = "red")
+```
+
+## Select files
+
+```{r}
+# Samples
+UCD52PR_100kb <- UCD52PR_100kb_juicer
+UCD52CR_100kb <- UCD52CR_100kb_juicer
+```
+
+
+## RCP
+The Relative Contact Probability (RCP) computes the contact probability as a function of genomic distance, as described in [@Lieberman-Aiden2009]. This can be computed for a specific set of chromosomes or genome-wide. To ignore centromeric contacts (which have a aberrant RCP), centromeric information is needed. This is taken from the experiment-object or found empirically by comparing trans-interactions.
+
+```{r doRCP, cache=F}
+RCP_out <- RCP(explist = list("PR" = UCD52PR_100kb, "CR" = UCD52CR_100kb)) #, 
+               #chromsToUse = '1')
+```
+
+The user can decide to plot the RCP per chromosome. If the data is sparse, a LOESS-smooting could be convenient. It takes the color and name from the experiment-objects. If we look at the resulting plot, we can see that the $\Delta CR$ has more interactions in the $[\pm\text{800kb}, \pm\text{2Mb}]$ range (figure \@ref(fig:RCPPLOT1)). The sizes of TADs are fall into this range, so a next step could be to dive into the TAD-specific analyses (discussed below). Moreover, the $\Delta CR$ has less interactions in the far-*cis* range ($[\pm\text{10Mb}, \pm\text{100Mb}]$): A- and B-compartments are often this size, so a next step could be to look more into compartmentalisation with `compartment_matrixplot` or `trans.compartment.plot`, for example.
+```{r, echo=F}
+options(scipen = 1)
+```
+
+```{r RCPPLOT1, cache=F, message=FALSE, fig.wide= T , fig.cap= "RCP. Every facet shows the RCP of one chromosome."}
+visualise(RCP_out)
+```
+
+### Differentials
+We can directly compare samples to one another (for example PR versus CR). To plot this, the `metric` argument has to be set to `lfc` and `contrast` to 1, indicating the PR sample (figure \@ref(fig:RCPPLOT2)). This plots the log-fold change of average probabilities.
+```{r RCPPLOT2, message=FALSE,  cache=F, fig.small= T , fig.cap= "RCP in lfc-mode.", warning=FALSE}
+# Plot RCP: combined
+mtx <- visualise(RCP_out, contrast = 1, metric = 'lfc', raw = TRUE)
+mtx_to_plot <- mtx$data
+
+plot_decay <- function(mtx = mtx1, title = "Genome-wide decay difference") {
+  ggplot(mtx, aes(x = distance, y = P) ) + 
+    geom_hline(yintercept = 0) +
+    # geom_point(shape=16, color = mycols[2]) + 
+    geom_line(size = 1, color = mycols[1]) +
+    # geom_smooth(se = FALSE) +
+    scale_color_manual(name = "Condition:", values = c("genome-wide" = mycols[7])) +
+    labs(title = title, x = "Distance (bp)", y = expression(log2(P[CR]/P[PR]))) +
+    scale_x_log10(breaks = trans_breaks("log10", function(x) 10^x),
+                  labels = trans_format("log10", math_format(10^.x))) +
+    annotation_logticks(sides="b") +
+    theme_bw() + theme(legend.position = "none")
+}
+plot_decay(mtx = mtx_to_plot, title = "Genome-wide decay difference")
+ggsave(filename = "manuscript/figures/figure_decay/Figure_decay_difference.svg", width = 3, height = 3 )
+```
+
+### Per chromosome differentials
+
+```{r}
+chr_selected <- c(1:22) # , "X", "Y"
+# List to store plots
+list_RCP_plots <- list()
+for (chr in chr_selected) {
+  RCP_out_chr <- RCP(explist = list("PR" = UCD52PR_100kb, "CR" = UCD52CR_100kb), chromsToUse = chr)
+  mtx <- visualise(RCP_out_chr, contrast = 1, metric = 'lfc', raw = TRUE)
+  mtx_to_plot <- mtx$data
+  p <- plot_decay(mtx = mtx_to_plot, title = paste("chr", chr))
+  list_RCP_plots <- c(list_RCP_plots, list(p))
+}
+# Auto-selection of the number of columns to arrange chromosome-specific plots
+n <- length(list_RCP_plots)
+nCol <- floor(sqrt(n))
+nCol <- 4
+pdf("manuscript/figures/figure_decay/Figure_decay_difference_chr.pdf", width = 8, height = 11 )
+do.call("grid.arrange", c(list_RCP_plots, ncol=nCol))
+dev.off()
+# ggsave(filename = "manuscript/figures/Figure_decay_difference_chr.svg", width = 8, height = 11 )
+```
+

@@ -1,0 +1,166 @@
+---
+title: "HiCrep analysis of individual replicates"
+author: "Mikhail Dozmorov"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: no
+  html_document:
+    theme: cerulean
+    toc: yes
+---
+
+```{r setup, echo=FALSE, message=FALSE, warning=FALSE}
+# Set up the environment
+library(knitr)
+opts_chunk$set(cache.path='cache/', fig.path='img/', cache=F, tidy=T, fig.keep='high', echo=F, dpi=100, warnings=F, message=F, comment=NA, warning=F, results='as.is', fig.width = 10, fig.height = 6) #out.width=700, 
+library(pander)
+panderOptions('table.split.table', Inf)
+set.seed(1)
+library(dplyr)
+options(stringsAsFactors = FALSE)
+```
+
+# Libraries
+
+```{r libraries}
+library(readr)
+library(pheatmap)
+library(ggpubr)
+library(ggplot2)
+library("ggsci")
+library(scales)
+# scales::show_col(pal_lancet("lanonc")(8))
+mycols = pal_lancet("lanonc")(8)
+library(ggrepel)
+```
+
+# Settings
+
+```{r settings, echo=TRUE}
+# Data resolution, name of the subfolder
+resolution <- "M1" # 1Mb
+# resolution <- "K100" # 100kb 
+# Average by mean or median
+# average_by <- "median"
+average_by <- "mean"
+
+# Script folder
+dir_project <- "/Users/mdozmorov/Documents/Work/GitHub/Katarzyna/PDXHiC"
+
+# Data folder, switch between Arima and PhRMA, match with Annotation file
+dir_data <- file.path("/Users/mdozmorov/Documents/Data/GoogleDrive/HiC_files/04.Arima_replicates_HiCrep", resolution)
+# dir_data <- file.path("/Users/mdozmorov/Documents/Data/PhRMA/PDXproject_analysis/04.Phase_replicates_HiCrep", resolution)
+# Annotation file, switch between Arima and PhRMA, match with Data folder
+annotation_file <- file.path(dir_project, "data/sample_annotation_Arima.csv")
+# annotation_file <- file.path(dir_project, "data/Dozmorov_samples_04.23.2019.csv")
+```
+
+```{r eval=FALSE}
+# Function to convert file names into text
+file_to_annotation <- function(fileName = "105246_105380.txt") {
+  fileName <- sub(".txt.gz", "", fileName, fixed = TRUE)
+  sample1 <- substr(fileName, 1, 7)
+  sample2 <- substr(fileName, 9, 15)
+  sampleOut1 <- paste0(sample_annotation$Cell[sample_annotation$ID == sample1], sample_annotation$Tumor[sample_annotation$ID == sample1], sample_annotation$percentUnmapped[sample_annotation$ID == sample1])
+  sampleOut2 <- paste0(sample_annotation$Cell[sample_annotation$ID == sample2], sample_annotation$Tumor[sample_annotation$ID == sample2], sample_annotation$percentUnmapped[sample_annotation$ID == sample2])
+  paste0(sampleOut1, "_", sampleOut2)
+}
+
+# Max-min correlation difference distribution in individual pairwise comparisons
+res <- c()
+for (i in 1:length(files)) {
+  mtx <- read_tsv(file.path(dir_data, files[i]), skip = 2, col_names = FALSE)
+  res <- c(res, max(mtx, na.rm = TRUE) - min(mtx, na.rm = TRUE))
+}
+names(res) <- files
+summary(res)
+res[which.max(res)] 
+file_to_annotation(names(res[which.max(res)]))
+```
+
+# Get sample annotations
+
+```{r}
+# Annotation
+sample_annotation <- read_csv(annotation_file, col_types = c("ccccc"))
+```
+
+# Get correlation data
+
+```{r}
+files <- list.files(path = dir_data, pattern = "*.txt.gz")
+corr_all_data <- matrix(data = 1, nrow = length(sample_annotation$ID), ncol = length(sample_annotation$ID))
+rownames(corr_all_data) <- colnames(corr_all_data) <- sample_annotation$ID
+# Fill in the matrix
+for (i in 1:length(files)) {
+  mtx <- read_tsv(file.path(dir_data, files[i]), skip = 2, col_names = FALSE)
+  if (average_by == "mean") {
+    mtx_average <- mean(mtx$X1, na.rm = TRUE)
+  }
+  if (average_by == "median") {
+    mtx_average <- median(mtx$X1, na.rm = TRUE)
+  }
+  fileName <- sub(".txt.gz", "", files[i], fixed = TRUE)
+  # Extract sample names depending on data
+  if (grepl("Arima", dir_data)) {
+    sample1 <- substr(fileName, 1, 7)
+    sample2 <- substr(fileName, 9, 15)
+  } else {
+    sample1 <- substr(fileName, 1, 6)
+    sample2 <- substr(fileName, 8, 13)
+  }
+  corr_all_data[sample1, sample2] <- corr_all_data[sample2, sample1] <- mtx_average
+}
+# Match order
+sample_annotation <- sample_annotation[match(rownames(corr_all_data), sample_annotation$ID), ]
+all.equal(rownames(corr_all_data), sample_annotation$ID)
+mtx_to_plot <- corr_all_data
+rownames(mtx_to_plot) <- colnames(mtx_to_plot) <- sample_annotation$Sample.Name
+```
+
+# MDS
+
+```{r}
+mds <- cmdscale(d = (1 - mtx_to_plot)) %>% as_tibble()
+colnames(mds) <- c("Dim.1", "Dim.2")
+mds <- mds %>% mutate(Groups = sample_annotation$Tumor, Samples = sample_annotation$Sample.Name)
+mds$Groups <- factor(mds$Groups, levels = c("PR", "CR"))
+ggplot(mds, aes(x = Dim.1, y = Dim.2, color = Groups, label = Samples)) +
+  geom_point(size = 2) +
+  # scale_color_lancet() +
+  scale_color_manual(values = mycols[1:2]) +
+  # scale_color_brewer(palette = "Spectral") +
+  theme_bw() +
+  xlab("Coordinate 1") + ylab("Coordinate 2") +
+  geom_label_repel(show.legend = FALSE) #, force=1, box.padding=0.5, label.padding = 0.2, direction = c("y"), segment.color = 'grey50', max.overlaps = 15)
+ggsave(file.path(dir_project, "manuscript/figures/figure_replicates/FigureS1A.svg"), width = 4, height = 3)
+```
+
+# Heatmap
+
+```{r}
+save_pheatmap_svg <- function(x, filename, width=4.5, height=3, units = "in", res = 300) {
+  stopifnot(!missing(x))
+  stopifnot(!missing(filename))
+  svg(filename, width=width, height=height)
+  grid::grid.newpage()
+  grid::grid.draw(x$gtable)
+  dev.off()
+}
+# Plotting
+mydf <- data.frame(Group = factor(sample_annotation$Tumor, levels = c("PR", "CR")) )
+rownames(mydf) <- sample_annotation$Sample.Name
+# All data
+clust_method <- "euclidean"
+# clust_method <- "correlation"
+x <- pheatmap(mtx_to_plot, cluster_cols = T, cluster_rows = T,
+         clustering_method = "ward.D", 
+         clustering_distance_rows = clust_method, 
+         clustering_distance_cols = clust_method, 
+         annotation_row = mydf, annotation_colors = list(Group = c(PR = mycols[1], CR = mycols[2])),
+         treeheight_row = 40,
+         treeheight_col = 0, 
+         display_numbers = TRUE)
+save_pheatmap_svg(x, file.path(dir_project, "manuscript/figures/figure_replicates/FigureS1B.svg"), width = 4.8, height = 3)
+```
