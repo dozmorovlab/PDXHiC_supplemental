@@ -1,4 +1,4 @@
-# RNA-seq procssing scripts
+# Differentially expressed transcripts and their functional significance.
 
 <!-- /Users/mdozmorov/Documents/Work/VCU_work/ChuckHarrell/ChuckHarrell_BrainMetastasis_12-2016/2021.10.28_NewBulkRNASeq_Preprocessing/10.28.21_TPMCalc_DataPreproc.R -->
 - `01_TPMCalc_DataPreproc.R` - Preprocessing of Salmon gene counts

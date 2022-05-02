@@ -1,4 +1,4 @@
-# Whole-genome sequencing processing scripts
+# Whole Genome Sequencing coverage differences between the CR and PR conditions
 
 <!-- /Users/mdozmorov/Documents/Data/GoogleDrive/HiC_files/results/WGS/submit08_htseq.sh -->
 - `submit08_htseq.sh` - Counting reads in genes
