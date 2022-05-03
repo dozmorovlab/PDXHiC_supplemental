@@ -1,0 +1,712 @@
+---
+title: "Analysis"
+author: "Mikhail Dozmorov"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: no
+  html_document:
+    theme: cerulean
+    toc: yes
+---
+
+```{r setup, echo=FALSE, message=FALSE, warning=FALSE}
+# Set up the environment
+library(knitr)
+opts_chunk$set(cache.path='cache/', fig.path='img/', cache=F, tidy=T, fig.keep='high', echo=F, dpi=100, warnings=F, message=F, comment=NA, warning=F, results='as.is', fig.width = 10, fig.height = 6) #out.width=700, 
+library(pander)
+panderOptions('table.split.table', Inf)
+set.seed(1)
+library(dplyr)
+options(stringsAsFactors = FALSE)
+```
+
+# Libraries
+
+```{r libraries}
+library(GenomicRanges)
+library(GenomicInteractions)
+library(InteractionSet)
+library(data.table)
+library(MDmisc)
+```
+
+# Excludable regions
+
+```{r}
+if (!file.exists("excludable.rda")) {
+  library(rCGH)
+  library(AnnotationHub)
+  ah <- AnnotationHub()
+  # Centromeres
+  # Adjust chromosome names
+  hg38$chrom[hg38$chrom == 23] <- "X"
+  hg38$chrom[hg38$chrom == 24] <- "Y"
+  hg38$chrom <- paste0("chr", hg38$chrom)
+  # Make GRanges object
+  hg38.UCSC.centromere <- makeGRangesFromDataFrame(hg38, seqnames.field = "chrom", start.field = "centromerStart", end.field = "centromerEnd")
+  # Assign seqinfo data
+  seqlengths(hg38.UCSC.centromere) <- hg38$length
+  genome(hg38.UCSC.centromere)     <- "hg38"
+  # Telomeres
+  query_data <- query(ah, c("excluderanges", "UCSC", "Homo Sapiens", "hg38", "telomere"))
+  hg38.UCSC.telomere <- query_data[["AH95938"]]
+  # Excluderanges
+  query_data <- query(ah, "excluderanges")
+  excludeGR.hg38.Kundaje.1 <- query_data[["AH95917"]]
+  save(hg38.UCSC.centromere, hg38.UCSC.telomere, excludeGR.hg38.Kundaje.1, file = "excludable.rda")
+} else {
+  load("excludable.rda")
+}
+```
+
+
+# Functions
+
+- PR unique - green, 0,255,0
+- CR unique - red, 255,0,0
+- Common - blue, 0,0,255
+
+```{r functions}
+#' Convert GInteractions to BEDPE format, color according to condition
+#' @param mtx_selected data frame from GInteractions
+#' @param col color
+#' @param conditon condition, goes into the name field
+#' Returns a data frame with coordinates kept in full numerical format 
+toBEDPE <- function(mtx_selected = as.data.frame(loops_XX_common), col = "0,255,0", condition = "Common") {
+  x_selected <- data.frame(chr1       = as.character(mtx_selected$seqnames1),
+                           x1         = mtx_selected$start1,
+                           x2         = mtx_selected$end1,
+                           chr2       = mtx_selected$seqnames2,
+                           y1         = mtx_selected$start2,
+                           y2         = mtx_selected$end2,
+                           name       = paste(condition, mtx_selected$name, sep = "_"),
+                           score      = ".",
+                           strand1    = ".",
+                           strand2    = ".",
+                           color      = col)
+  # Keep full numbers
+  x_selected$x1 <- format(x_selected$x1, scientific = FALSE, trim = TRUE, justify = "none")
+  x_selected$x2 <- format(x_selected$x2, scientific = FALSE, trim = TRUE, justify = "none")
+  x_selected$y1 <- format(x_selected$y1, scientific = FALSE, trim = TRUE, justify = "none")
+  x_selected$y2 <- format(x_selected$y2, scientific = FALSE, trim = TRUE, justify = "none")
+  return(x_selected)
+}
+
+#' Convert GRanges to BED format, color according to condition
+#' @param mtx_selected data frame from GRanges
+#' @param col color
+#' @param conditon condition, goes into the name field
+#' Returns a data frame with coordinates kept in full numerical format 
+toBED <- function(mtx_selected = as.data.frame(anchors_PR_common), col = "0,255,0", condition = "Common", header = FALSE) {
+  x_selected <- data.frame(chr        = as.character(mtx_selected$seqnames),
+                           start      = mtx_selected$start,
+                           end        = mtx_selected$end,
+                           name       = condition,
+                           score      = mtx_selected$freq,
+                           strand     = ".",
+                           thickStart = mtx_selected$start,
+                           thickEnd   = mtx_selected$end,
+                           color      = col)
+  # Largest on top
+  x_selected <- x_selected[order(x_selected$score, decreasing = TRUE), ]
+  # Keep full numbers
+  x_selected$start <- format(x_selected$start, scientific = FALSE, trim = TRUE, justify = "none")
+  x_selected$end   <- format(x_selected$end, scientific = FALSE, trim = TRUE, justify = "none")
+  x_selected$thickStart <- format(x_selected$thickStart, scientific = FALSE, trim = TRUE, justify = "none")
+  x_selected$thickEnd   <- format(x_selected$thickEnd, scientific = FALSE, trim = TRUE, justify = "none")
+  # Append header
+  if (header){
+    x_selected <- rbind(c("track itemRgb=On", rep("", ncol(x_selected) - 1)), x_selected)
+  }
+  return(x_selected)
+}
+
+#' Summary of loop width
+#' @param loops GInteractions object
+#' @return Formatted string of loop min/median/mean/max
+width_summary <- function(prefix = "Loops PR all width", loops = loops_PR_unique) {
+  width_vector <- pairdist(loops)
+  # https://stackoverflow.com/questions/33047601/paste-collapse-with-tabs
+  width_string <- c(list(prefix), list(min(width_vector)), list(median(width_vector)), list(round(mean(width_vector), digits = 2)), list(max(width_vector)))
+  return(width_string)
+}
+
+#' Loop width difference test
+#' @param loops1 first GInteraction object
+#' @param loops2 second GInteraction object
+#' @return Formatted Wilcoxon p-value of width distribution differences
+width_difference <- function(loops1 = loops_PR_unique, loops2 = loops_CR_unique) {
+  width_vector1 <- pairdist(loops1)
+  width_vector2 <- pairdist(loops2)
+  # If width is NA (for neoloops), return 1
+  if (sum(is.na(width_vector1)) > 0 | sum(is.na(width_vector2)) > 0) {
+    return(1)
+  } else {
+    return(formatC(wilcox.test(width_vector1, width_vector2)$p.value, format = "e", digits = 2))
+  }
+}
+```
+
+# Settings
+
+```{r settings, echo=TRUE}
+# Resolution, or Window size for SpectralTAD only
+res <- "10"
+# How to treat adjacent anchors
+merge_adjacent <- TRUE
+# Overlap type for findOverlaps
+if (merge_adjacent) {
+  overlap_type <- "any"
+} else {
+  overlap_type <- "equal"
+}
+```
+
+# Load data
+
+Creation of PR and CR GInteractions
+
+## Mustache
+
+```{r mustache, eval=FALSE}
+# Mustache data
+dir_data <- "/Users/mdozmorov/Documents/Data/GoogleDrive/HiC_files/results/mustache_results_v2"
+fileNameIn1 <- file.path(dir_data, paste0("VC_UCD52PR_", res, ".tsv")) # PR
+fileNameIn2 <- file.path(dir_data, paste0("VC_UCD52CR_", res, ".tsv")) # CR
+# Function to construct GInteractions
+# Should be modified for different data
+mtx2GInteractions <- function(fileNameIn = fileNameIn1, condition = "PR") {
+  # Load data
+  mtx <- read.table(fileNameIn, sep = "\t", header = TRUE)
+  gr1 <- data.frame(chr   = paste0("chr", mtx[, 1]),
+                    start = mtx[, 2],
+                    end   = mtx[, 3]) %>% makeGRangesFromDataFrame(., seqinfo = unique(c(paste0("chr", mtx[, 1]), paste0("chr", mtx[, 4]))))
+  gr2 <- data.frame(chr   = paste0("chr", mtx[, 4]),
+                    start = mtx[, 5],
+                    end   = mtx[, 6]) %>% makeGRangesFromDataFrame(., seqinfo = unique(c(paste0("chr", mtx[, 1]), paste0("chr", mtx[, 4]))))
+  
+  # Domain GRanges overlapping centromeres
+  # gr  <- data.frame(chr   = mtx[, 1],
+  #                   start = mtx[, 2],
+  #                   end   = mtx[, 6]) %>% makeGRangesFromDataFrame(., seqinfo = unique(mtx[, 1]))
+  # gr_centromere  <- findOverlaps(gr,  hg38.UCSC.centromere, type = "any")
+  gr1_centromere  <- findOverlaps(gr1,  hg38.UCSC.centromere, type = "any")
+  gr2_centromere  <- findOverlaps(gr2,  hg38.UCSC.centromere, type = "any")
+  # Boundaries overlapping telomeres
+  gr1_telomeres  <- findOverlaps(gr1, hg38.UCSC.telomere, type = "any")
+  gr2_telomeres  <- findOverlaps(gr2, hg38.UCSC.telomere, type = "any")
+  # Boundaries overlapping excludable regions
+  gr1_exclude    <- findOverlaps(gr1, excludeGR.hg38.Kundaje.1, type = "any")
+  gr2_exclude    <- findOverlaps(gr2, excludeGR.hg38.Kundaje.1, type = "any")
+  # Index to exclude
+  index_exclude  <- sort(unique(c(queryHits(gr1_centromere), queryHits(gr2_centromere), queryHits(gr1_telomeres), queryHits(gr2_telomeres), queryHits(gr1_exclude), queryHits(gr2_exclude))))
+  # Complement index to include
+  index_include  <- setdiff(seq(1:length(gr1)), index_exclude)
+  
+  # GInteractions excluding selected boundaries
+  gi <- GInteractions(gr1[index_include], gr2[index_include], mode = "strict")
+  # Construct name
+  gi$name <- paste(condition,
+                    paste("Width", calculateDistances(gi), sep = ":"),
+                    paste("FDR", formatC(mtx[index_include, 7], format = "e", digits = 2), sep = ":"),
+                    paste("SCALE", round(mtx[index_include, 8], digits = 2), sep = ":"), sep = "_")
+  return(gi)
+}
+# Create condition-specific GInteractions
+gi_PR <- mtx2GInteractions(fileNameIn = fileNameIn1, condition = "PR")
+gi_CR <- mtx2GInteractions(fileNameIn = fileNameIn2, condition = "CR")
+# Make seqlevels the same
+seqlevels(gi_PR) <- seqlevels(gi_CR) <- unique(c(seqlevels(gi_PR), seqlevels(gi_CR)))
+```
+
+## HiCcompare
+
+```{r HiCcompare, eval=FALSE}
+# HiCcompare data
+dir_data <- "/Users/mdozmorov/Documents/Data/GoogleDrive/HiC_files/results/HiCcompare_results_v2"
+fileNameIn1 <- file.path(dir_data, paste0(res, "kb_glob_fdr_DN.bedpe")) # PR
+fileNameIn2 <- file.path(dir_data, paste0(res, "kb_glob_fdr_UP.bedpe")) # CR
+# Function to construct GInteractions
+# Should be modified for different data
+mtx2GInteractions <- function(fileNameIn = fileNameIn1, condition = "PR") {
+  # Load data
+  mtx <- read.table(fileNameIn, sep = "\t", header = FALSE)
+  gr1 <- data.frame(chr   = mtx[, 1],
+                    start = mtx[, 2],
+                    end   = mtx[, 3]) %>% makeGRangesFromDataFrame(., seqinfo = unique(c(mtx[, 1], mtx[, 4])))
+  gr2 <- data.frame(chr   = mtx[, 4],
+                    start = mtx[, 5],
+                    end   = mtx[, 6]) %>% makeGRangesFromDataFrame(., seqinfo = unique(c(mtx[, 1], mtx[, 4])))
+  
+  # Domain GRanges overlapping centromeres
+  # gr  <- data.frame(chr   = mtx[, 1],
+  #                   start = mtx[, 2],
+  #                   end   = mtx[, 6]) %>% makeGRangesFromDataFrame(., seqinfo = unique(mtx[, 1]))
+  # gr_centromere  <- findOverlaps(gr,  hg38.UCSC.centromere, type = "any")
+  gr1_centromere  <- findOverlaps(gr1,  hg38.UCSC.centromere, type = "any")
+  gr2_centromere  <- findOverlaps(gr2,  hg38.UCSC.centromere, type = "any")
+  # Boundaries overlapping telomeres
+  gr1_telomeres  <- findOverlaps(gr1, hg38.UCSC.telomere, type = "any")
+  gr2_telomeres  <- findOverlaps(gr2, hg38.UCSC.telomere, type = "any")
+  # Boundaries overlapping excludable regions
+  gr1_exclude    <- findOverlaps(gr1, excludeGR.hg38.Kundaje.1, type = "any")
+  gr2_exclude    <- findOverlaps(gr2, excludeGR.hg38.Kundaje.1, type = "any")
+  # Index to exclude
+  index_exclude  <- sort(unique(c(queryHits(gr1_centromere), queryHits(gr2_centromere), queryHits(gr1_telomeres), queryHits(gr2_telomeres), queryHits(gr1_exclude), queryHits(gr2_exclude))))
+  # Complement index to include
+  index_include  <- setdiff(seq(1:length(gr1)), index_exclude)
+  
+  # GInteractions excluding selected boundaries
+  gi <- GInteractions(gr1[index_include], gr2[index_include], mode = "strict")
+  # Construct name
+  gi$name <- paste(condition,
+                   paste("Width", calculateDistances(gi), sep = ":"),
+                   paste("M", round(mtx[index_include, 7], digits = 2), sep = ":"),
+                   paste("D", round(mtx[index_include, 8], digits = 2), sep = ":"),
+                   paste("A", round(mtx[index_include, 9], digits = 2), sep = ":"),
+                   paste("padj", formatC(mtx[index_include, 10], format = "e", digits = 2), sep = ":"), sep = "_")
+  return(gi)
+}
+# Create condition-specific GInteractions
+gi_PR <- mtx2GInteractions(fileNameIn = fileNameIn1, condition = "PR")
+gi_CR <- mtx2GInteractions(fileNameIn = fileNameIn2, condition = "CR")
+# Make seqlevels the same
+seqlevels(gi_PR) <- seqlevels(gi_CR) <- unique(c(seqlevels(gi_PR), seqlevels(gi_CR)))
+```
+
+## NeoLoopFinder
+
+```{r neoloopfinder, eval=TRUE}
+# Neoloopfinder data
+# dir_data <- "/Users/mdozmorov/Documents/Data/GoogleDrive/HiC_files/results/neoloopfinder_results_v2"
+dir_data <- "/Users/mdozmorov/Documents/Data/GoogleDrive/HiC_files/results/neoloopfinder_results_v2/10-06-2021-neoloopfinder-neoloops-Kavita"
+fileNameIn1 <- file.path(dir_data, "PR.neoloopfinder.loops.txt") # PR
+fileNameIn2 <- file.path(dir_data, "CR.neoloopfinder.loops.txt") # CR
+
+# Function to construct GInteractions
+# Should be modified for different data
+mtx2GInteractions <- function(fileNameIn = fileNameIn1, condition = "PR") {
+  # Load data
+  mtx <- read.table(fileNameIn, sep = "\t", header = FALSE)
+  # Subset to neoloops, marked as "1" in the third position of assembly column
+  mtx <- mtx[sapply(mtx[, 7], function(x) strsplit(x, ",")[[1]][3]) == "1", ]
+  gr1 <- data.frame(chr   = mtx[, 1],
+                    start = mtx[, 2],
+                    end   = mtx[, 3]) %>% makeGRangesFromDataFrame(., seqinfo = unique(c(mtx[, 1], mtx[, 4])))
+  gr2 <- data.frame(chr   = mtx[, 4],
+                    start = mtx[, 5],
+                    end   = mtx[, 6]) %>% makeGRangesFromDataFrame(., seqinfo = unique(c(mtx[, 1], mtx[, 4])))
+
+  # Domain GRanges overlapping centromeres
+  # gr  <- data.frame(chr   = mtx[, 1],
+  #                   start = mtx[, 2],
+  #                   end   = mtx[, 6]) %>% makeGRangesFromDataFrame(., seqinfo = unique(mtx[, 1]))
+  gr1_centromere  <- findOverlaps(gr1,  hg38.UCSC.centromere, type = "any")
+  gr2_centromere  <- findOverlaps(gr2,  hg38.UCSC.centromere, type = "any")
+  # Boundaries overlapping telomeres
+  gr1_telomeres  <- findOverlaps(gr1, hg38.UCSC.telomere, type = "any")
+  gr2_telomeres  <- findOverlaps(gr2, hg38.UCSC.telomere, type = "any")
+  # Boundaries overlapping excludable regions
+  gr1_exclude    <- findOverlaps(gr1, excludeGR.hg38.Kundaje.1, type = "any")
+  gr2_exclude    <- findOverlaps(gr2, excludeGR.hg38.Kundaje.1, type = "any")
+  # Index to exclude
+  index_exclude  <- sort(unique(c(queryHits(gr1_centromere), queryHits(gr2_centromere), queryHits(gr1_telomeres), queryHits(gr2_telomeres), queryHits(gr1_exclude), queryHits(gr2_exclude))))
+  # Complement index to include
+  index_include  <- setdiff(seq(1:length(gr1)), index_exclude)
+  
+  # GInteractions excluding selected boundaries
+  gi <- GInteractions(gr1[index_include], gr2[index_include], mode = "strict")
+  # Construct name
+  gi$name <- paste(condition, paste("Width", calculateDistances(gi), sep = ":"), mtx[index_include, 7], sep = "_")
+  return(gi)
+}
+# Create condition-specific GInteractions
+gi_PR <- mtx2GInteractions(fileNameIn = fileNameIn1, condition = "PR")
+gi_CR <- mtx2GInteractions(fileNameIn = fileNameIn2, condition = "CR")
+# Make seqlevels the same
+seqlevels(gi_PR) <- seqlevels(gi_CR) <- unique(c(seqlevels(gi_PR), seqlevels(gi_CR)))
+```
+
+## GENOVA
+
+```{r genova, eval=FALSE}
+# Neoloopfinder data
+dir_data <- "/Users/mdozmorov/Documents/Data/GoogleDrive/HiC_files/results/TAD_Boundaries/GENOVA_IS"
+fileNameIn1 <- file.path(dir_data, paste0("UCD52PR_", res, "000.pairedbed")) # PR
+fileNameIn2 <- file.path(dir_data, paste0("UCD52CR_", res, "000.pairedbed")) # CR
+# Load PR data
+mtx_PR <- read.table(fileNameIn1, sep = "\t", header = FALSE)
+gr1 <- data.frame(chr   = mtx_PR[, 1],
+                  start = mtx_PR[, 2],
+                  end   = mtx_PR[, 3]) %>% makeGRangesFromDataFrame(., seqinfo = unique(c(mtx_PR[, 1], mtx_PR[, 4])))
+gr2 <- data.frame(chr   = mtx_PR[, 4],
+                  start = mtx_PR[, 5],
+                  end   = mtx_PR[, 6]) %>% makeGRangesFromDataFrame(., seqinfo = unique(c(mtx_PR[, 1], mtx_PR[, 4])))
+gi_PR <- GInteractions(gr1, gr2, mode = "strict")
+# Construct name
+gi_PR$name <- paste("Width", calculateDistances(gi_PR), sep = ":")
+
+# Load CR data
+mtx_CR <- read.table(fileNameIn2, sep = "\t", header = FALSE)
+gr1 <- data.frame(chr   = mtx_CR[, 1],
+                  start = mtx_CR[, 2],
+                  end   = mtx_CR[, 3]) %>% makeGRangesFromDataFrame(., seqinfo = unique(c(mtx_CR[, 1], mtx_CR[, 4])))
+gr2 <- data.frame(chr   = mtx_CR[, 4],
+                  start = mtx_CR[, 5],
+                  end   = mtx_CR[, 6]) %>% makeGRangesFromDataFrame(., seqinfo = unique(c(mtx_CR[, 1], mtx_CR[, 4])))
+gi_CR <- GInteractions(gr1, gr2, mode = "strict")
+# Construct name
+gi_CR$name <- paste("Width", calculateDistances(gi_CR), sep = ":")
+# Make seqlevels the same
+seqlevels(gi_PR) <- seqlevels(gi_CR) <- unique(c(seqlevels(gi_PR), seqlevels(gi_CR)))
+```
+
+## SpectralTAD
+
+```{r spectraltad, eval=FALSE}
+# Neoloopfinder data
+dir_data <- "/Users/mdozmorov/Documents/Data/GoogleDrive/HiC_files/results/TAD_Boundaries/SpectralTAD_v2/"
+fileNameIn1 <- file.path(dir_data, paste0("UCD52PR_VC_10000_qualT_zT_", res, "_0.8.pairedbed")) # PR
+fileNameIn2 <- file.path(dir_data, paste0("UCD52CR_VC_10000_qualT_zT_", res, "_0.8.pairedbed")) # CR
+
+# Function to construct GInteractions
+# Should be modified for different data
+mtx2GInteractions <- function(fileNameIn = fileNameIn1, condition = "PR") {
+  # Load data
+  mtx <- read.table(fileNameIn, sep = "\t", header = FALSE)
+  gr1 <- data.frame(chr   = mtx[, 1],
+                    start = mtx[, 2],
+                    end   = mtx[, 3]) %>% makeGRangesFromDataFrame(., seqinfo = unique(c(mtx[, 1], mtx[, 4])))
+  gr2 <- data.frame(chr   = mtx[, 4],
+                    start = mtx[, 5],
+                    end   = mtx[, 6]) %>% makeGRangesFromDataFrame(., seqinfo = unique(c(mtx[, 1], mtx[, 4])))
+
+  # Domain GRanges overlapping centromeres
+  # gr  <- data.frame(chr   = mtx[, 1],
+  #                   start = mtx[, 2],
+  #                   end   = mtx[, 6]) %>% makeGRangesFromDataFrame(., seqinfo = unique(mtx[, 1]))
+  gr1_centromere  <- findOverlaps(gr1,  hg38.UCSC.centromere, type = "any")
+  gr2_centromere  <- findOverlaps(gr2,  hg38.UCSC.centromere, type = "any")
+  # Boundaries overlapping telomeres
+  gr1_telomeres  <- findOverlaps(gr1, hg38.UCSC.telomere, type = "any")
+  gr2_telomeres  <- findOverlaps(gr2, hg38.UCSC.telomere, type = "any")
+  # Boundaries overlapping excludable regions
+  gr1_exclude    <- findOverlaps(gr1, excludeGR.hg38.Kundaje.1, type = "any")
+  gr2_exclude    <- findOverlaps(gr2, excludeGR.hg38.Kundaje.1, type = "any")
+  # Index to exclude
+  index_exclude  <- sort(unique(c(queryHits(gr1_centromere), queryHits(gr2_centromere), queryHits(gr1_telomeres), queryHits(gr2_telomeres), queryHits(gr1_exclude), queryHits(gr2_exclude))))
+  # Complement index to include
+  index_include  <- setdiff(seq(1:length(gr1)), index_exclude)
+  
+  # GInteractions excluding selected boundaries
+  gi <- GInteractions(gr1[index_include], gr2[index_include], mode = "strict")
+  # Construct name
+  gi$name <- paste(condition, paste("Width", calculateDistances(gi), sep = ":"), sep = "_")
+  return(gi)
+}
+# Create condition-specific GInteractions
+gi_PR <- mtx2GInteractions(fileNameIn = fileNameIn1, condition = "PR")
+gi_CR <- mtx2GInteractions(fileNameIn = fileNameIn2, condition = "CR")
+# Make seqlevels the same
+seqlevels(gi_PR) <- seqlevels(gi_CR) <- unique(c(seqlevels(gi_PR), seqlevels(gi_CR)))
+```
+
+## hicFindTADs
+
+```{r hicFindTADs, eval=FALSE}
+# hicFindTADs data
+dir_data <- "/Users/mdozmorov/Documents/Data/GoogleDrive/HiC_files/results/TAD_Boundaries/hicFindTADs_v2"
+fileNameIn1 <- file.path(dir_data, "UCD52PR_10000_norm_KR_0.0005_domains.bed")
+fileNameIn2 <- file.path(dir_data, "UCD52CR_10000_norm_KR_0.0005_domains.bed")
+# Function to construct GInteractions
+# Should be modified for different data
+mtx2GInteractions <- function(fileNameIn = fileNameIn1, condition = "PR") {
+  # Load data
+  mtx <- read.table(fileNameIn, sep = "\t", header = FALSE)
+  gr1 <- data.frame(chr   = mtx[, 1],
+                    start = mtx[, 2] - (as.numeric(res) * 1000 / 2),
+                    end   = mtx[, 2] + (as.numeric(res) * 1000 / 2)) %>% makeGRangesFromDataFrame(., seqinfo = unique(mtx[, 1]))
+  gr2 <- data.frame(chr   = mtx[, 1],
+                    start = mtx[, 3] - (as.numeric(res) * 1000 / 2),
+                    end   = mtx[, 3] + (as.numeric(res) * 1000 / 2)) %>% makeGRangesFromDataFrame(., seqinfo = unique(mtx[, 1]))
+  
+  # Domain GRanges overlapping centromeres
+  # gr  <- data.frame(chr   = mtx[, 1],
+  #                   start = mtx[, 2],
+  #                   end   = mtx[, 6]) %>% makeGRangesFromDataFrame(., seqinfo = unique(mtx[, 1]))
+  gr1_centromere  <- findOverlaps(gr1,  hg38.UCSC.centromere, type = "any")
+  gr2_centromere  <- findOverlaps(gr2,  hg38.UCSC.centromere, type = "any")
+  # Boundaries overlapping telomeres
+  gr1_telomeres  <- findOverlaps(gr1, hg38.UCSC.telomere, type = "any")
+  gr2_telomeres  <- findOverlaps(gr2, hg38.UCSC.telomere, type = "any")
+  # Boundaries overlapping excludable regions
+  gr1_exclude    <- findOverlaps(gr1, excludeGR.hg38.Kundaje.1, type = "any")
+  gr2_exclude    <- findOverlaps(gr2, excludeGR.hg38.Kundaje.1, type = "any")
+  # Index to exclude
+  index_exclude  <- sort(unique(c(queryHits(gr1_centromere), queryHits(gr2_centromere), queryHits(gr1_telomeres), queryHits(gr2_telomeres), queryHits(gr1_exclude), queryHits(gr2_exclude))))
+  # Complement index to include
+  index_include  <- setdiff(seq(1:length(gr1)), index_exclude)
+  
+  # GInteractions excluding selected boundaries
+  gi <- GInteractions(gr1[index_include], gr2[index_include], mode = "strict")
+  # Construct name
+  gi$name <- paste(condition, paste("Width", calculateDistances(gi), sep = ":"), mtx[index_include, 4], round(mtx[index_include, 5], digits = 2), sep = "_")
+  return(gi)
+}
+# Create condition-specific GInteractions
+gi_PR <- mtx2GInteractions(fileNameIn = fileNameIn1, condition = "PR")
+gi_CR <- mtx2GInteractions(fileNameIn = fileNameIn2, condition = "CR")
+# Make seqlevels the same
+seqlevels(gi_PR) <- seqlevels(gi_CR) <- unique(c(seqlevels(gi_PR), seqlevels(gi_CR)))
+```
+
+# Results file names
+
+```{r results}
+# Results
+dir_results <- file.path(dir_data, paste0("preprocessing_", overlap_type))
+dir.create(dir_results, recursive = TRUE) # Create if does not exist
+## Loops
+fileNameOut1.1 <- file.path(dir_results, paste0("loops_PR_unique_", res, "kb.bedpe"))
+fileNameOut1.2 <- file.path(dir_results, paste0("loops_CR_unique_", res, "kb.bedpe"))
+fileNameOut1.3 <- file.path(dir_results, paste0("loops_PR_common_", res, "kb.bedpe"))
+fileNameOut1.4 <- file.path(dir_results, paste0("loops_CR_common_", res, "kb.bedpe"))
+fileNameOut1.5 <- file.path(dir_results, paste0("loops_combined_",  res, "kb.bedpe"))
+fileNameOut1.6 <- file.path(dir_results, paste0("loops_PR_all_",  res, "kb.bedpe"))
+fileNameOut1.7 <- file.path(dir_results, paste0("loops_CR_all_",  res, "kb.bedpe"))
+## Anchors
+fileNameOut2.1 <- file.path(dir_results, paste0("anchors_PR_unique_", res, "kb.bed"))
+fileNameOut2.2 <- file.path(dir_results, paste0("anchors_CR_unique_", res, "kb.bed"))
+fileNameOut2.3 <- file.path(dir_results, paste0("anchors_PR_common_", res, "kb.bed"))
+fileNameOut2.4 <- file.path(dir_results, paste0("anchors_CR_common_", res, "kb.bed"))
+fileNameOut2.5 <- file.path(dir_results, paste0("anchors_combined_", res, "kb.bed"))
+fileNameOut2.6 <- file.path(dir_results, paste0("anchors_PR_all_", res, "kb.bed"))
+fileNameOut2.7 <- file.path(dir_results, paste0("anchors_CR_all_", res, "kb.bed"))
+# Statistics with the number of loops and anchors
+fileNameOut3 <- file.path(dir_results, paste0("log_", res, "kb.csv"))
+```
+
+# Separate loops
+
+```{r separate_loops}
+# Intersect loops
+index_common_loops <- findOverlaps(gi_PR, gi_CR, type = overlap_type)
+# Condition-specific loops complementing common
+loops_PR_unique <- gi_PR[setdiff(1:length(gi_PR), unique(queryHits(index_common_loops)))]
+loops_CR_unique <- gi_CR[setdiff(1:length(gi_CR), unique(subjectHits(index_common_loops)))]
+# Common loops should have identical first and second anchors. Don't check if no overlap, length(index_common_loops) is 0
+if (length(index_common_loops) != 0) {
+  # Overlap between first anchors
+  overlap_common_loops1 <- findOverlaps(anchorOne(gi_PR[queryHits(index_common_loops)]), anchorOne(gi_CR[subjectHits(index_common_loops)]), type=overlap_type)
+  # Overlap between second anchors
+  overlap_common_loops2 <- findOverlaps(anchorTwo(gi_PR[queryHits(index_common_loops)]), anchorTwo(gi_CR[subjectHits(index_common_loops)]), type=overlap_type)
+  # Their indices should be equal
+  stopifnot(all.equal(unique(sort(queryHits(overlap_common_loops1))),
+                      unique(sort(subjectHits(overlap_common_loops1)))) &
+            all.equal(unique(sort(queryHits(overlap_common_loops2))), 
+                      unique(sort(subjectHits(overlap_common_loops2)))))
+  # stopifnot(all.equal(anchorOne(gi_PR[queryHits(index_common_loops)]), anchorOne(gi_CR[subjectHits(index_common_loops)]))  & 
+  #   all.equal(anchorTwo(gi_PR[queryHits(index_common_loops)]), anchorTwo(gi_CR[subjectHits(index_common_loops)]))) 
+}
+# Actual common loops
+loops_PR_common <- gi_PR[unique(queryHits(index_common_loops))]
+loops_CR_common <- gi_CR[unique(subjectHits(index_common_loops))]
+
+# PR unique - green, 0,255,0
+bedpe_PR_unique <- toBEDPE(mtx_selected = as.data.frame(loops_PR_unique), col = "0,255,0", condition = "PR")
+fwrite(bedpe_PR_unique, file = fileNameOut1.1, quote = FALSE, sep = "\t", row.names = FALSE)
+# CR unique - red, 255,0,0
+bedpe_CR_unique <- toBEDPE(mtx_selected = as.data.frame(loops_CR_unique), col = "255,0,0", condition = "CR")
+fwrite(bedpe_CR_unique, file = fileNameOut1.2, quote = FALSE, sep = "\t", row.names = FALSE)
+# Common - blue, 0,0,255
+# If common are present, add them to the combined, otherwise, combine just PR and CR specific
+# if (length(index_common_loops) != 0) {
+#   bedpe_XX_common <- toBEDPE(mtx_selected = as.data.frame(loops_XX_common), col = "0,0,255", condition = "Common") 
+#   fwrite(bedpe_XX_common, file = fileNameOut1.3, quote = FALSE, sep = "\t", row.names = FALSE)
+#   # Save combined, with common
+#   fwrite(rbind(bedpe_PR_unique, bedpe_CR_unique, bedpe_XX_common), file = fileNameOut1.5, quote = FALSE, sep = "\t", row.names = FALSE)
+# } else {
+#   # Save combined, without common
+#   fwrite(rbind(bedpe_PR_unique, bedpe_CR_unique), file = fileNameOut1.5, quote = FALSE, sep = "\t", row.names = FALSE)
+# }
+
+if (length(index_common_loops) != 0) {
+  # PR common
+  bedpe_PR_common <- toBEDPE(mtx_selected = as.data.frame(loops_PR_common), col = "0,0,255", condition = "Common PR") 
+  fwrite(bedpe_PR_common, file = fileNameOut1.3, quote = FALSE, sep = "\t", row.names = FALSE)
+  # CR common
+  bedpe_CR_common <- toBEDPE(mtx_selected = as.data.frame(loops_CR_common), col = "0,0,255", condition = "Common CR") 
+  fwrite(bedpe_CR_common, file = fileNameOut1.4, quote = FALSE, sep = "\t", row.names = FALSE)
+  # Save combined, with common
+  fwrite(rbind(bedpe_PR_unique, bedpe_CR_unique, bedpe_PR_common, bedpe_CR_common), file = fileNameOut1.5, quote = FALSE, sep = "\t", row.names = FALSE)
+} else {
+  # Save combined, without common
+  fwrite(rbind(bedpe_PR_unique, bedpe_CR_unique), file = fileNameOut1.5, quote = FALSE, sep = "\t", row.names = FALSE)
+}
+
+# Save statistics
+fwrite(list("Loops PR all count", length(gi_PR)), file = fileNameOut3, append = TRUE)
+fwrite(list("Loops CR all count", length(gi_CR)), file = fileNameOut3, append = TRUE)
+fwrite(list("Loops PR unique count", length(loops_PR_unique)), file = fileNameOut3, append = TRUE)
+fwrite(list("Loops CR unique count", length(loops_CR_unique)), file = fileNameOut3, append = TRUE)
+if (length(index_common_loops) != 0) {
+  fwrite(list("Loops PR common count", length(loops_PR_common)), file = fileNameOut3, append = TRUE)
+  fwrite(list("Loops CR common count", length(loops_CR_common)), file = fileNameOut3, append = TRUE)
+}
+# Width summary
+fwrite(width_summary("Loops PR all width", gi_PR), file = fileNameOut3, append = TRUE)
+fwrite(width_summary("Loops CR all width", gi_CR), file = fileNameOut3, append = TRUE)
+fwrite(width_summary("Loops PR unique width", loops_PR_unique), file = fileNameOut3, append = TRUE)
+fwrite(width_summary("Loops CR unique width", loops_CR_unique), file = fileNameOut3, append = TRUE)
+if (length(index_common_loops) != 0) {
+  fwrite(width_summary("Loops PR common width", loops_PR_common), file = fileNameOut3, append = TRUE)
+  fwrite(width_summary("Loops CR common width", loops_CR_common), file = fileNameOut3, append = TRUE)
+}
+# Difference analysis
+fwrite(list("PR all vs. CR all width difference", width_difference(gi_PR, gi_CR)), file = fileNameOut3, append = TRUE)
+fwrite(list("PR unique vs. CR unique width difference", width_difference(loops_PR_unique, loops_CR_unique)), file = fileNameOut3, append = TRUE)
+if (length(index_common_loops) != 0) {
+  fwrite(list("PR unique vs. PR common width difference", width_difference(loops_PR_unique, loops_PR_common)), file = fileNameOut3, append = TRUE)
+  fwrite(list("CR unique vs. CR common width difference", width_difference(loops_CR_unique, loops_CR_common)), file = fileNameOut3, append = TRUE)
+}
+```
+
+# Separate anchors
+
+BED files are sorted by anchor interaction frequency, most frequently interacting on top
+
+```{r separate_anchors}
+## Get unique anchors with interaction frequency counts
+# PR
+# Combine first and second anchors
+all_anchors_PR <- c(anchors(gi_PR)$first, anchors(gi_PR)$second) %>% sort() 
+# Count overlap with themselves = frequency
+all_anchors_PR$freq <- countOverlaps(all_anchors_PR, all_anchors_PR, type = overlap_type) 
+full_anchors_PR <- all_anchors_PR # Unreduced anchors
+# Reduce adjacent anchors
+all_anchors_PR <- reduce(all_anchors_PR)
+
+# CR
+# Combine first and second anchors
+all_anchors_CR <- c(anchors(gi_CR)$first, anchors(gi_CR)$second) %>% sort() 
+# Count overlap with themselves = frequency
+all_anchors_CR$freq <- countOverlaps(all_anchors_CR, all_anchors_CR, type = overlap_type) 
+full_anchors_CR <- all_anchors_CR # Unreduced anchors
+# Reduce adjacent anchors
+all_anchors_CR <- reduce(all_anchors_CR)
+
+# Selected region, for testing
+# gr_selected <- GRanges(seqnames="chr7", ranges = IRanges(20455284, 20737829))
+# all_anchors_PR <- subsetByOverlaps(all_anchors_PR, gr_selected)
+# all_anchors_CR <- subsetByOverlaps(all_anchors_CR, gr_selected)
+
+## Indexes for overlapping regions
+index_common_anchors <- findOverlaps(all_anchors_PR, all_anchors_CR, type = overlap_type)
+
+## Indexes for unique regions
+index_anchors_PR_unique <- setdiff(1:length(all_anchors_PR), queryHits(index_common_anchors))
+index_anchors_CR_unique <- setdiff(1:length(all_anchors_CR), subjectHits(index_common_anchors))
+# PR
+anchors_PR_unique <- all_anchors_PR[index_anchors_PR_unique] # All unique anchors
+# anchors_PR_unique <- anchors_PR_unique[order(anchors_PR_unique$freq, decreasing = TRUE)] # Most interacting on top
+# CR
+anchors_CR_unique <- all_anchors_CR[index_anchors_CR_unique] # All unique anchors
+# anchors_CR_unique <- anchors_CR_unique[order(anchors_CR_unique$freq, decreasing = TRUE)] # Most interacting on top
+
+# All common anchors
+anchors_PR_common <- all_anchors_PR[unique(queryHits(index_common_anchors))]
+anchors_CR_common <- all_anchors_CR[unique(subjectHits(index_common_anchors))]
+
+# Restore the original anchor coordinates
+anchors_PR_unique <- subsetByOverlaps(full_anchors_PR, anchors_PR_unique)
+anchors_CR_unique <- subsetByOverlaps(full_anchors_CR, anchors_CR_unique)
+anchors_PR_common <- subsetByOverlaps(full_anchors_PR, anchors_PR_common)
+anchors_CR_common <- subsetByOverlaps(full_anchors_CR, anchors_CR_common)
+
+# Check, should be equal reduced. Don't check if no overlap, length(index_common_loops) is 0
+# if (length(index_common_anchors) != 0) {
+#   stopifnot(all.equal(reduce(anchors_PR_common), reduce(anchors_CR_common)))
+# }
+# # Check, common regions should be equal. Don't check if no overlap, length(index_common_loops) is 0
+# if (length(index_common_anchors) != 0) {
+#   # Overlap between reduced common regions should have the same indices
+#   overlap_common_anchors <- findOverlaps(reduce(anchors_PR_common),
+#                                          reduce(anchors_CR_common),
+#                                          type = overlap_type)
+#   stopifnot(all.equal(unique(sort(queryHits(overlap_common_anchors))), unique(sort(subjectHits(overlap_common_anchors)))))
+# 
+#     # stopifnot(all.equal(granges(all_anchors_PR[queryHits(index_common_anchors)]), granges(all_anchors_CR[subjectHits(index_common_anchors)])))
+# }
+# PR unique - green, 0,255,0
+bed_PR_unique <- toBED(mtx_selected = as.data.frame(anchors_PR_unique), col = "0,255,0", condition = "PR", header = TRUE)
+fwrite(bed_PR_unique, file = fileNameOut2.1, quote = FALSE, sep = "\t", row.names = FALSE, col.names = FALSE)
+# CR unique - red, 255,0,0
+bed_CR_unique <- toBED(mtx_selected = as.data.frame(anchors_CR_unique), col = "255,0,0", condition = "CR", header = TRUE)
+fwrite(bed_CR_unique, file = fileNameOut2.2, quote = FALSE, sep = "\t", row.names = FALSE, col.names = FALSE)
+# Common - blue, 0,0,255
+# If common are present, add them to the combined, otherwise, combine just PR and CR specific
+if (length(index_common_anchors) != 0) {
+  # PR common
+  bed_PR_common <- toBED(mtx_selected = as.data.frame(anchors_PR_common), col = "0,0,255", condition = "Common PR", header = TRUE) 
+  fwrite(bed_PR_common, file = fileNameOut2.3, quote = FALSE, sep = "\t", row.names = FALSE, col.names = FALSE)
+  # CR common
+  bed_CR_common <- toBED(mtx_selected = as.data.frame(anchors_CR_common), col = "0,0,255", condition = "Common CR", header = TRUE) 
+  fwrite(bed_CR_common, file = fileNameOut2.4, quote = FALSE, sep = "\t", row.names = FALSE, col.names = FALSE)
+
+  # Create combined, with common
+  bed_combined <- rbind(toBED(mtx_selected = as.data.frame(anchors_PR_unique), col = "0,255,0", condition = "PR", header = FALSE),
+                        toBED(mtx_selected = as.data.frame(anchors_CR_unique), col = "255,0,0", condition = "CR", header = FALSE),
+                        toBED(mtx_selected = as.data.frame(anchors_PR_common), col = "0,0,255", condition = "Common PR", header = FALSE) ,
+                        toBED(mtx_selected = as.data.frame(anchors_CR_common), col = "0,0,255", condition = "Common CR", header = FALSE))
+  # Sort by frequency
+  bed_combined <- bed_combined[order(bed_combined$score, decreasing = TRUE), ]
+  # Append header
+  bed_combined <- rbind(c("track itemRgb=On", rep("", ncol(bed_combined) - 1)), bed_combined)
+  # Save combined
+  fwrite(bed_combined, file = fileNameOut2.5, quote = FALSE, sep = "\t", row.names = FALSE, col.names = FALSE)
+} else {
+  # Create combined, without common
+  bed_combined <- rbind(toBED(mtx_selected = as.data.frame(anchors_PR_unique), col = "0,255,0", condition = "PR", header = FALSE),
+                        toBED(mtx_selected = as.data.frame(anchors_CR_unique), col = "255,0,0", condition = "CR", header = FALSE))
+  # Sort by frequency
+  bed_combined <- bed_combined[order(bed_combined$score, decreasing = TRUE), ]
+  # Append header
+  bed_combined <- rbind(c("track itemRgb=On", rep("", ncol(bed_combined) - 1)), bed_combined)
+  # Save combined
+  fwrite(bed_combined, file = fileNameOut2.5, quote = FALSE, sep = "\t", row.names = FALSE, col.names = FALSE)
+}
+
+# Save statistics
+fwrite(list("Anchors PR all count", length(full_anchors_PR)), file = fileNameOut3, append = TRUE)
+fwrite(list("Anchors CR all count", length(full_anchors_CR)), file = fileNameOut3, append = TRUE)
+fwrite(list("Anchors PR unique count", length(anchors_PR_unique)), file = fileNameOut3, append = TRUE)
+fwrite(list("Anchors CR unique count", length(anchors_CR_unique)), file = fileNameOut3, append = TRUE)
+fwrite(list("Anchors PR common count", length(anchors_PR_common)), file = fileNameOut3, append = TRUE)
+fwrite(list("Anchors CR common count", length(anchors_CR_common)), file = fileNameOut3, append = TRUE)
+```
+
+# All loops
+
+```{r all_loops}
+# PR all - green, 0,255,0
+bedpe_PR_all <- toBEDPE(mtx_selected = as.data.frame(gi_PR), col = "0,255,0", condition = "PR all")
+fwrite(bedpe_PR_all, file = fileNameOut1.6, quote = FALSE, sep = "\t", row.names = FALSE)
+# CR all - red, 255,0,0
+bedpe_CR_all <- toBEDPE(mtx_selected = as.data.frame(gi_CR), col = "255,0,0", condition = "CR all")
+fwrite(bedpe_CR_all, file = fileNameOut1.7, quote = FALSE, sep = "\t", row.names = FALSE)
+```
+
+# All anchors
+
+```{r all_anchors}
+# PR all - green, 0,255,0
+bed_PR_all <- toBED(mtx_selected = as.data.frame(full_anchors_PR), col = "0,255,0", condition = "PR", header = TRUE)
+fwrite(bed_PR_all, file = fileNameOut2.6, quote = FALSE, sep = "\t", row.names = FALSE, col.names = FALSE)
+# CR all - red, 255,0,0
+bed_CR_all <- toBED(mtx_selected = as.data.frame(full_anchors_CR), col = "255,0,0", condition = "CR", header = TRUE)
+fwrite(bed_CR_all, file = fileNameOut2.7, quote = FALSE, sep = "\t", row.names = FALSE, col.names = FALSE)
+```
+
+
+
