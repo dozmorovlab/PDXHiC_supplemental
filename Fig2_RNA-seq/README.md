@@ -24,4 +24,16 @@
 - `05_Pathview.Rmd` - KEGG pathway plots overlaying gene expression
     - Input: `GSEA_edgeR_UCD52PR_CR_0.1_1.xlsx`, `04.06.22_DEGs_edgeR_UCD52PR_CR_annotated.xlsx`
     - Output: `pathways_selected.pdf`
+    
+<!-- Desktop/PDXHiC/Maggie/34_LncSEA_Visualizations.Rmd -->
+- `06_LncSEA_Visualizations.Rmd` - upregulated lncRNAs in CR condition.
+  - Input: `Supplementary_Table_1.xlsx` sheets with output from running LncSEA on lncRNAs upregulated in CR condition.
+  - Output: barplot showing top lncRNA sets for different LncSEA classes. 
+  
+<!-- Desktop/PDXHiC/Maggie/40_GSEA_figures_RNAseq_dcHiC.Rmd -->
+- `07_GSEA_Enrichment_Figure.Rmd` - barplots of most significant pathways from running GSEA analysis.
+  - Input: KEGG & MSigDb GSEA enrichment produced from `03_GSEA_edgeR.Rmd`. 
+  - Output: barplots of most significant KEGG & MSigDb pathways enriched in differentially expressed genes. 
+  
+  
 

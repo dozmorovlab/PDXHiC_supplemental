@@ -1,0 +1,135 @@
+---
+title: "Combined Gene Enrichment Barplots"
+author: "Maggie Marshall"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: no
+  html_document:
+    theme: cerulean
+    toc: yes
+---
+
+```{r setup, echo=FALSE, message=FALSE, warning=FALSE}
+# Set up the environment
+library(knitr)
+opts_chunk$set(cache.path='cache/', fig.path='img/', cache=F, tidy=T, fig.keep='high', echo=F, dpi=100, warnings=F, message=F, comment=NA, warning=F, results='as.is', fig.width = 10, fig.height = 6) #out.width=700, 
+library(pander)
+panderOptions('table.split.table', Inf)
+set.seed(1)
+library(tidyverse)
+options(stringsAsFactors = FALSE)
+```
+
+Visualized gene enrichments done on important genes found in different analyses (RNA seq, WGS, etc.) for PR and CR conditions in Supplementary Table 6. 
+
+For PR: 
+KEGG: Influenza A
+C2: NIKOLSKY_BREAST_CANCER_22Q13_AMPLICON
+HALLMARK: Interferon GAMMA_RESPONSE
+
+For CR: 
+KEGG: Ribosome
+KEGG: Oxidative phosphorylation
+C2: Nikolsky BREAST_CANCER 17q21-q25 AMPLICON
+
+Each condition will be its own separate plot. 
+
+# Libraries 
+
+```{r lib}
+library(ggplot2)
+library(readxl)
+library("ggsci")
+library(scales)
+scales::show_col(pal_lancet("lanonc")(8))
+mycols = pal_lancet("lanonc")(8)
+library(forcats)
+library(purrr)
+library(cowplot)
+```
+
+
+# Settings 
+
+```{r settings}
+# Data directory 
+# Maggie's 
+data_dir = "~/Google Drive/My Drive/HiC_files/results/manuscript/Supplementary_Table_6"
+# output directory to save plots, Figure 7 folder 
+output_dir = "~/Google Drive/My Drive/HiC_files/results/manuscript/Figure_7"
+# condition parameter 
+condition = "PR"
+# condition = "CR"
+# set bar plot fill parameter depending on condition, PR = blue, CR = red 
+bar_fill = ifelse(condition == "PR", mycols[1], mycols[2])
+# set sheet names to read in depending on condition and pathways to select for 
+if (condition == "PR"){
+  sheet_names = c("PR.KEGG", "PR.C2", "PR.H")
+  pathways = c("Influenza A", "HALLMARK_INTERFERON_GAMMA_RESPONSE", "NIKOLSKY_BREAST_CANCER_22Q13_AMPLICON")
+  pathway_plot_names = c("KEGG: Influenza A", "HALLMARK: Interferon \ngamma response", 
+                         "C2: Nikolsky breast cancer \n 22q13 amplicon")
+} else{
+  sheet_names = c("CR.KEGG", "CR.C2")
+  pathways = c("NIKOLSKY_BREAST_CANCER_17Q21_Q25_AMPLICON", "Ribosome", "Oxidative phosphorylation")
+  pathway_plot_names = c("C2: Nikolsky breast cancer \n 17q21-q25 amplicon", "KEGG: Ribosome", 
+                         "KEGG: Oxidative \nphosphorylation")
+}
+# enrichment file, supp table 6
+enrichmentFile = file.path(data_dir, "Supplementary_Table_6.xlsx")
+# output plot 
+outputPlot = file.path(output_dir, paste0(condition, "_tableS6_enrichment_barplot.svg"))
+```
+
+# Read in the file 
+
+```{r file}
+# iterate through each sheet in sheet_names and read it in as a dataframe then add the dataframe to the mtx dataframe
+mtx = data.frame(matrix(ncol = 2, nrow = 0))
+for (i in 1:length(sheet_names)){
+  # read in the current sheet into a dataframe 
+  mtx1 = read_xlsx(enrichmentFile, sheet = sheet_names[i])
+  # change the Term name to ID if it's KEGG 
+  colnames(mtx1)[1] = "ID"
+  # filter to contain only IDs that are in the pathways vector 
+  mtx1 = mtx1 %>% 
+    dplyr::filter(ID %in% pathways) 
+  # if current sheet is KEGG get the Adjusted.P.value column and rename to p.adjust
+  if (grepl("KEGG",sheet_names[i])) {
+    mtx1 = mtx1 %>% 
+      dplyr::mutate(p.adjust = Adjusted.P.value)
+  }
+  # select only the ID and p.adjust columns, only ones we need 
+  mtx1 = mtx1 %>% 
+    dplyr::select(ID, p.adjust)
+  # combine mtx1 with mtx
+  mtx = rbind(mtx, mtx1) %>% 
+    arrange(ID)
+}
+# add -log10(padjusted) column to matrix 
+mtx = mtx %>% 
+  dplyr::mutate(log10pvalue = -log10(p.adjust)) %>% 
+  dplyr::arrange(desc(log10pvalue))
+```
+
+
+# Visualization 
+
+```{r vis}
+panel_plot = ggplot(data = mtx, aes(x = reorder(ID, log10pvalue), y = log10pvalue)) +
+    geom_col(fill = bar_fill, width = 0.5) +
+    coord_flip() +
+    theme_cowplot() +
+    ylab("-log10 adjusted p-value") +
+    xlab("Enrichment term") +
+    theme(text = element_text(size = 20),
+          axis.text = element_text(size = 15),
+          legend.position = c(0.05, 0.85),
+          legend.background = element_rect(fill="white", 
+                                    size=0.5, linetype="solid")) +
+  scale_x_discrete(breaks = pathways, 
+                   labels = pathway_plot_names)
+ggsave(plot = panel_plot, filename = outputPlot, width = 8, height = 3)
+```
+
+

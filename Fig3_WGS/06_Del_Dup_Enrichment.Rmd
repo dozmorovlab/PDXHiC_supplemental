@@ -1,0 +1,291 @@
+---
+title: "WGS DEL DUP Regions Enrichment"
+author: "Maggie Marshall"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: cerulean
+    toc: yes
+  pdf_document:
+    toc: no
+---
+
+
+```{r setup, echo=FALSE, message=FALSE, warning=FALSE}
+# Set up the environment
+library(knitr)
+opts_chunk$set(cache.path='cache/', fig.path='img/', cache=F, tidy=T, fig.keep='high', echo=F, dpi=100, warnings=F, message=F, comment=NA, warning=F, results='as.is', fig.width = 10, fig.height = 6) #out.width=700, 
+library(pander)
+panderOptions('table.split.table', Inf)
+set.seed(1)
+library(dplyr)
+options(stringsAsFactors = FALSE)
+```
+
+BED files with `hic` and `wgs` suffixes  in `/Users/mdozmorov/Documents/Data/GoogleDrive/HiC_files/results/WGS/results` contain large deleted (DEL) and duplicated (DUP) regions. For each bed file, the DEL and DUP regions will be separated and the genes overlapping each region will be obtained, then KEGG & MSigDb unranked enrichment will be performed (on DEL & DUP overlapping regions separately) and the results for each type of region will be concatenated into one excel file. 
+
+# Libraries 
+
+```{r lib}
+library(tidyverse)
+library(writexl)
+library(clusterProfiler)
+library(enrichR)
+library(msigdbr)
+library(annotables)
+library(ggplot2)
+library(ChIPpeakAnno)
+library(rtracklayer)
+library(GenomicDistributionsData)
+library(EnsDb.Hsapiens.v86) ##(hg38)
+library(HGNChelper)
+```
+
+# Settings 
+
+```{r settings}
+# Maggie's home directory 
+home_dir = '~/Google Drive/My Drive'
+# Mikhail's home directory
+# home_dir <- "/Users/mdozmorov/Documents/Data/GoogleDrive"
+
+# set file suffix parameter 
+# file_suffix = 'hic'
+file_suffix = 'wgs'
+
+# Set data directory, results directory will be the same thing 
+data_dir = file.path(home_dir, 'HiC_files/results/WGS/results')
+# set input file depending on the file_suffix 
+inputFile = file.path(data_dir, paste0("UCD52CR_vs_PR_", file_suffix, "_10000_log2ratio.bed"))
+# set output file depending on the file_suffix 
+outputFile = file.path(data_dir, paste0("UCD52CR_vs_PR_", file_suffix, "_10000_log2ratio_enrichment.xlsx"))
+p_adj_cutoff   <- 0.3 # FDR cutoff for enrichment results (KEGG)
+# Cutoff for significant MSigDb enrichment
+padj_msigdb_cutoff <- 0.05
+```
+
+# Load in gene annotations for human 
+
+```{r loadanno}
+# which analysis should be run. 
+human_analysis <- TRUE
+## create annotation file from EnsDb
+annoData <- toGRanges(EnsDb.Hsapiens.v86, feature="gene")
+# Prepate gene annotations, remove non-canonical chromosome names
+if (human_analysis) {
+  library(org.Hs.eg.db)
+  OrgDb = "org.Hs.eg.db"; species = "hsa"
+  gene_annotations <- grch38[ !(grepl("_", grch38$chr) | grepl("GL", grch38$chr)), c("ensgene", "symbol", "biotype", "description")]
+  gene_annotations <- gene_annotations[ !duplicated(gene_annotations) & !is.na(gene_annotations$symbol) & gene_annotations$description != "" & gene_annotations$biotype == "protein_coding", ] # filter out protein coding 
+  KEGG <- "KEGG_2019_Human"
+}
+# All genes for background
+all.symbol <- unique(gene_annotations$symbol) 
+# filter annoData to contain only protein coding genes 
+annoData <- annoData[annoData$gene_name %in% all.symbol]
+
+# MSigDb organism
+msigdbr_org <- "Homo sapiens"
+m_df <- msigdbr(species = msigdbr_org)
+m_df_gs_cat <- unique(m_df$gs_cat) %>% sort()
+
+msigdb_enrich <- function(dataset) {
+  res.msigdf.all <- list()
+  for (gs_cat in m_df_gs_cat) {
+    m_t2g <- msigdbr(species = msigdbr_org, category = gs_cat) %>% dplyr::select(gs_name, human_gene_symbol)
+    m_t2d <- msigdbr(species = msigdbr_org, category = gs_cat) %>% 
+       dplyr::distinct(gs_name, gs_description)
+
+    # Standard enrichment analysis
+    em <- enricher(unique(dataset), TERM2GENE = m_t2g, pvalueCutoff = padj_msigdb_cutoff)
+    # Check if the results are non-empty
+    if (!is.null(em)) {
+      res.msigdf.em <- em@result
+      # sort the genes alphabetically
+      res.msigdf.em <- res.msigdf.em %>% 
+      # separate the rows by splitting by the delimiter and expanding the rows 
+      separate_rows(geneID, convert = TRUE, sep = "/") %>% 
+      # group the genes by their other columns to keep them 
+      group_by(ID, Description, GeneRatio, BgRatio, pvalue, p.adjust, qvalue, Count) %>%
+      # sort the genes for each term 
+      arrange(geneID) %>% 
+      summarise(geneID = paste(geneID, collapse="/")) %>% 
+      arrange(pvalue, p.adjust)
+           # Append description
+      res.msigdf.em <- left_join(res.msigdf.em, m_t2d, by = c("ID" = "gs_name"))
+      res.msigdf.em$Description <- res.msigdf.em$gs_description
+    } else {
+      res.msigdf.em <- as.data.frame(matrix(data = "Nothing significant", nrow = 1, ncol = 9))
+      colnames(res.msigdf.em) <- c("ID", "Description", "GeneRatio", "BgRatio", "pvalue", "p.adjust", "qvalue", "geneID", "Count")
+    }
+
+    # Combine the results and add names
+    res.msigdf.all <- c(res.msigdf.all, list(res.msigdf.em))
+    names(res.msigdf.all)[length(res.msigdf.all)] <- paste0("Enrich.", gs_cat)
+    
+  }
+  res.msigdf.all
+}
+```
+
+# Read in BED file & Get overlapping genes
+
+```{r filegenes}
+# Correct gene names
+current_map <- getCurrentHumanMap()
+# read in BED file into df 
+WGS_regions = read.table(inputFile, sep = '\t', header = FALSE)
+# separate the df into the duplicated regions and deleted regions 
+DUP_regions = WGS_regions %>% 
+  dplyr::filter(V4 == "DUP")
+DEL_regions = WGS_regions %>% 
+  dplyr::filter(V4 == "DEL") 
+# convert to GRanges 
+DUP_regions = GRanges(seqnames=DUP_regions$V1, 
+                      ranges= IRanges(start=DUP_regions$V2, end=DUP_regions$V3))
+DEL_regions = GRanges(seqnames=DEL_regions$V1, 
+                      ranges= IRanges(start=DEL_regions$V2, end=DEL_regions$V3))
+# Annotate the overlapping peaks with the genomic features in the AnnotationData. Obtain Gene names and distances for just overlapping genes (set output argument to "overlapping"). Set maxgap = -1 (default) which indicates that for genes to be "overlapping" anchors they cannot be disjoint. Set select = "all" which returns multiple overlapping peaks, if an anchor overlaps with multiple genes it returns all genes. 
+# DUP regions 
+DUP_overlap.anno = annotatePeakInBatch(DUP_regions, AnnotationData=annoData, 
+                                     output="overlapping", select= "all")
+DUP_overlap.anno$gene_name = 
+  annoData$gene_name[match(DUP_overlap.anno$feature,
+                           names(annoData))]
+### Filter out gene Names that are NA, anchors that did not overlap with any genes! 
+DUP_overlap.anno=DUP_overlap.anno[!is.na(DUP_overlap.anno$gene_name)]
+# convert annotated peaks to dataframe, then extract the seqnames, start, end, peak, and gene_name columns, the rest aren't important 
+DUP_overlapping_genes = data.frame(DUP_overlap.anno) %>% 
+  dplyr::select(seqnames, start, end, peak, gene_name)
+# then make sure the final dataframe does not contain any duplicated genes for each region 
+DUP_overlapping_genes = unique(DUP_overlapping_genes)
+# fixe gene names
+genes_checked <- checkGeneSymbols(DUP_overlapping_genes$gene_name, map = current_map)
+DUP_overlapping_genes$gene_name <- genes_checked$Suggested.Symbol
+
+# DEL regions 
+DEL_overlap.anno = annotatePeakInBatch(DEL_regions, AnnotationData=annoData, 
+                                     output="overlapping", select= "all")
+DEL_overlap.anno$gene_name = 
+  annoData$gene_name[match(DEL_overlap.anno$feature,
+                           names(annoData))]
+### Filter out gene Names that are NA, anchors that did not overlap with any genes! 
+DEL_overlap.anno=DEL_overlap.anno[!is.na(DEL_overlap.anno$gene_name)]
+# convert annotated peaks to dataframe, then extract the seqnames, start, end, peak, and gene_name columns, the rest aren't important 
+DEL_overlapping_genes = data.frame(DEL_overlap.anno) %>% 
+  dplyr::select(seqnames, start, end, peak, gene_name)
+# then make sure the final dataframe does not contain any duplicated genes for each region 
+DEL_overlapping_genes = unique(DEL_overlapping_genes)
+# fixe gene names
+genes_checked <- checkGeneSymbols(DEL_overlapping_genes$gene_name, map = current_map)
+DEL_overlapping_genes$gene_name <- genes_checked$Suggested.Symbol
+```
+
+# KEGG Enrichment 
+## KEGG enrichment function 
+
+function to sort out only the significant results from enrichment analysis
+
+```{r keggfunc}
+kegg_enrich <- function(compartment_genes, p_adj_cutoff = p_adj_cutoff) {
+  res.kegg <- enrichr(unique(compartment_genes), databases = KEGG) # KEGG results only
+  
+  # If significant results are present, save them
+  if (nrow(res.kegg[[KEGG]]) > 0 & sum(res.kegg[[KEGG]]$Adjusted.P.value < p_adj_cutoff) > 0) {
+    res.kegg <- as.data.frame(res.kegg[[KEGG]])
+    res.kegg <- res.kegg[res.kegg$Adjusted.P.value < p_adj_cutoff, , drop = FALSE]
+    compartment_genes <- res.kegg
+    # reorder the genes alphabetically 
+    compartment_genes <- compartment_genes %>% 
+      # separate the rows by splitting by the delimiter and expanding the rows 
+      separate_rows(Genes, convert = TRUE, sep = ";") %>% 
+      # group the genes by their Term & other columns to keep them 
+      group_by(Term, Overlap, P.value, Adjusted.P.value, Old.P.value, Old.Adjusted.P.value,
+               Odds.Ratio, Combined.Score) %>% 
+      # sort the genes for each term 
+      arrange(Genes) %>% 
+      summarise(Genes = paste(Genes, collapse="/")) %>% 
+      arrange(P.value, Adjusted.P.value)
+  } else {
+    compartment_genes <- as.data.frame(matrix(data = "Nothing significant", nrow = 1, ncol = 9))
+    colnames(compartment_genes) <- c("Term", "Overlap", "P.value", "Adjusted.P.value", "Old.P.value", "Old.Adjusted.P.value", "Odds.Ratio", "Combined.Score","Genes")
+    compartment_genes$`P.value` = 0
+    compartment_genes$`Adjusted.P.value` = 0
+    compartment_genes$`Old.P.value` = 0
+    compartment_genes$`Old.Adjusted.P.value` = 0
+    compartment_genes$`Odds.Ratio` = 0
+    compartment_genes$`Combined.Score` = 0
+  }
+  return(compartment_genes)
+}
+```
+
+## Perform KEGG Enrichment for DUP & DEL Genes
+
+```{r kegg}
+# run KEGG for DUP genes
+DUP_KEGG = kegg_enrich(DUP_overlapping_genes$gene_name, p_adj_cutoff = p_adj_cutoff)
+# run KEGG for DEL genes
+DEL_KEGG = kegg_enrich(DEL_overlapping_genes$gene_name, p_adj_cutoff = p_adj_cutoff)
+```
+
+# MSigDb Enrichment 
+
+## Perform MSigDb Enrichment for DUP & DEL Genes
+
+```{r msigdb}
+# run MSigDb enrichment for DUP genes
+DUP_msigdb <- msigdb_enrich(DUP_overlapping_genes$gene_name)
+# run MSigDb enrichment for DEL genes
+DEL_msigdb <- msigdb_enrich(DEL_overlapping_genes$gene_name)
+```
+
+# Combine the KEGG and MSigDb Enrichment results 
+DEL & DUP datasets where each category's result is one after the other ( ex. DEL.KEGG then DUP.KEGG, DEL.Enrich.C5 then DUP.Enrich.C5)
+
+```{r combine}
+# create empty list to hold the dataframes for each enrichment category for msigdb so we can add the results for DUP & DEL together, one after the other
+msigdb_combined_dfList = list()
+# list of the msigDB enrichment categories, could get from DUP or DEl it's the same
+msigdb_names = names(DUP_msigdb)
+# create empty list for the enrichment category names for the combined dflist
+combined_msig_cat_names = c()
+
+# iterate through the length of the msigdb_names list so we can get the dataframe at each index of the DUP msigdb results and DEl msigdb results list of dataframes
+for (i in 1:length(msigdb_names)) {
+  # append the DEL msigdb results at the next available position of the list of dataframes  
+  msigdb_combined_dfList[[length(msigdb_combined_dfList)+1]] = DEL_msigdb[[i]]
+  # append the category name along with DEL for the current results 
+  combined_msig_cat_names = c(combined_msig_cat_names, paste0("DEL.", msigdb_names[[i]]))
+  # append the DUP msigdb results at the next available position of the list of dataframes  
+  msigdb_combined_dfList[[length(msigdb_combined_dfList)+1]] = DUP_msigdb[[i]]
+  # append the category name along with DUP for the current results 
+  combined_msig_cat_names = c(combined_msig_cat_names, paste0("DUP.", msigdb_names[[i]]))
+}
+# change the names of the list of dataframes to the combined_msig_cat_names 
+names(msigdb_combined_dfList) = combined_msig_cat_names
+```
+
+# Export Results 
+
+```{r export}
+# create list of lists for export 
+x = c(list(DEL.KEGG = DEL_KEGG), list(DUP.KEGG = DUP_KEGG), msigdb_combined_dfList)
+write_xlsx(x, outputFile)
+```
+
+
+**KEGG:** "ID", "Description" - KEGG pathway ID/description, respectively; "NES" - [normalized enrichment score](http://software.broadinstitute.org/gsea/doc/GSEAUserGuideFrame.html); "pvalue", "p.adjust" - raw and FDR-adjusted p-values, respectively; "core_enrichment" - genes enriched in the corresponding pathway.
+
+
+- MSigDB collections, see  https://www.gsea-msigdb.org/gsea/msigdb/index.jsp. 
+    - **H**	hallmark gene sets  are coherently expressed signatures derived by aggregating many MSigDB gene sets to represent well-defined biological states or processes.
+    - **C1**	positional gene sets  for each human chromosome and cytogenetic band.
+    - **C2**	curated gene sets  from online pathway databases, publications in PubMed, and knowledge of domain experts.
+    - **C3**	regulatory target gene sets  based on gene target predictions for microRNA seed sequences and predicted transcription factor binding sites.
+    - **C4**	computational gene sets  defined by mining large collections of cancer-oriented microarray data.
+    - **C5**	GO gene sets  consist of genes annotated by the same GO terms.
+    - **C6**	oncogenic gene sets  defined directly from microarray gene expression data from cancer gene perturbations.
+    - **C7**	immunologic gene sets  defined directly from microarray gene expression data from immunologic studies.
+
+

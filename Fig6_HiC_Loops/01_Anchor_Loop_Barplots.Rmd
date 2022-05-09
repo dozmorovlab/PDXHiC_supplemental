@@ -1,0 +1,130 @@
+---
+title: "Anchor & Loop Bar Plots"
+author: "Maggie Marshall"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: cerulean
+    toc: yes
+  pdf_document:
+    toc: no
+---
+
+```{r setup, echo=FALSE, message=FALSE, warning=FALSE}
+# Set up the environment
+library(knitr)
+opts_chunk$set(cache.path = "cache/", fig.path = "img/", cache = F, tidy = T, fig.keep = "high", echo = F, dpi = 100, warnings = F, message = F, comment = NA, warning = F, results = "as.is", fig.width = 5, fig.height = 3, cache.lazy = FALSE) # out.width=700,
+library(pander)
+panderOptions("table.split.table", Inf)
+set.seed(1)
+library(dplyr)
+options(stringsAsFactors = FALSE)
+options(scipen=10000)
+```
+
+This script creates stacked bar plots showing the counts of CR (CR unique & CR common) and PR (PR unique and PR common) anchor and loops for each data type/resolution. Takes in the file `log_*` that contains the counts of anchors and loops for each condition and resolution (res) for the specified data type (XX)
+
+# Libraries 
+
+```{r lib}
+library(tidyverse)
+library(ggplot2)
+library("ggsci")
+library(scales)
+scales::show_col(pal_lancet("lanonc")(8))
+mycols = pal_lancet("lanonc")(8)
+library(forcats)
+```
+
+# Settings
+
+```{r settings}
+# Maggie's home directory
+home_dir = '~/Google Drive/My Drive'
+# Mikhail's home directory
+# home_dir <- "/Users/mdozmorov/Documents/Data/GoogleDrive"
+# data type parameter, comment out for whichever one is being used 
+data_type = "Mustache_v2"
+# data_type = "HiCcompare_v2"
+# preprocessing parameter, so far any is the only one 
+preprocessing = "any"
+# resolution parameter
+resolution = "10kb"
+
+# set data directory depending on data type, results will be saved in same directory
+if (data_type == "Mustache_v2"){
+  data_dir = file.path(home_dir, 'HiC_files/results/mustache_results_v2', paste0('preprocessing_', preprocessing))
+} else if (data_type == "HiCcompare_v2"){
+  data_dir = file.path(home_dir, 'HiC_files/results/HiCcompare_results_v2', paste0('preprocessing_', preprocessing))
+}
+```
+
+# Read in the log file containing anchor and loop counts & reformat data frame
+
+```{r file}
+# read in the file, since there is an unequal # of columns we have to do fill = TRUE and manually name the columns 
+logFile = read.table(file.path(data_dir, paste0("log_", resolution, ".csv")), 
+                     header = FALSE, sep = ",", fill = TRUE, col.names = paste0("V",seq_len(5))) %>% 
+  # select only the two columns we need
+  dplyr::select(V1, V2) %>% 
+  # pivot wider to get the values from V1 to the column names and the values from V2 to be each column's value for easy accessibility 
+  pivot_wider(names_from = V1,
+              values_from = V2)
+
+# create a new dataframe for loop and anchors where there are three columns, one for the condition (PR or CR), one for whether it is unique or common, and one for the value 
+# create first column 
+conditions = c("PR", "PR", "CR", "CR")
+# create column indicating unique or common
+shared = c("Unique", "Common", "Unique", "Common")
+# create column for that value for loops
+loops_value = c(logFile$`Loops PR unique count`, logFile$`Loops PR common count`, logFile$`Loops CR unique count`, logFile$`Loops CR common count`)
+# create column for that value for anchors 
+anchors_value = c(logFile$`Anchors PR unique count`, logFile$`Anchors PR common count`, logFile$`Anchors CR unique count`, logFile$`Anchors CR common count`)
+# make dataframe for loops 
+loops_df = data.frame(conditions, shared, loops_value) 
+# make dataframe for anchors 
+anchors_df = data.frame(conditions, shared, anchors_value)
+```
+
+# Create the bar plots for anchors & loops 
+
+```{r barplots}
+# create loops bar plot 
+loopBP = loops_df %>% 
+  ggplot(aes(fill = forcats::fct_rev(shared), y = loops_value, x = conditions)) +
+  geom_bar(position = "stack", stat="identity", width = 0.35) + 
+  theme_bw() +
+  # get rid of the grid 
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(), 
+        text = element_text(size = 13),
+        plot.title=element_text(hjust=0.5)) +
+  ylab("Count") +
+  xlab("") +
+  ggtitle("Loops") +
+  scale_fill_manual(values = rev(mycols[1:2]), name = "") + # get rid of legend title
+  scale_x_discrete(limits = c("PR", "CR"), 
+                   labels=c("Primary Tumor", "Carboplatin Resistant")) # reorder the x axis & change labels 
+# save the loop barplot
+ggsave(filename = file.path(data_dir, paste0("log_", resolution, "_loops_barplot.svg")), plot = loopBP, width = 5, height = 3)
+
+# create anchors bar plot 
+anchorBP = anchors_df %>% 
+  ggplot(aes(fill = forcats::fct_rev(shared), y = anchors_value, x = conditions)) +
+  geom_bar(position = "stack", stat="identity", width = 0.35) + 
+  theme_bw() +
+  # get rid of the grid 
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+         text = element_text(size = 13),
+        plot.title=element_text(hjust=0.5)) +
+  ylab("Count") +
+  xlab("") +
+  ggtitle("Anchors") +
+  scale_fill_manual(values = rev(mycols[1:2]), name = "") + # get rid of legend title 
+  scale_x_discrete(limits = c("PR", "CR"),
+                   labels=c("Primary Tumor", "Carboplatin Resistant")) # reorder the x axis & change labels
+# save the anchors barplot
+ggsave(filename = file.path(data_dir, paste0("log_", resolution, "_anchors_barplot.svg")), plot = anchorBP, width = 5, height = 3)
+```
+

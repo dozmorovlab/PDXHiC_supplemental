@@ -1,0 +1,885 @@
+---
+title: "KEGG & MSigDB Gene Enrichment"
+author: "Maggie Marshall"
+date: "`r Sys.Date()`"
+always_allow_html: true
+output:
+  html_document:
+    theme: cerulean
+    toc: yes
+  pdf_document:
+    toc: no
+---
+
+Gene enrichment done on genes OVERLAPPING PR,CR, and Common Mustache, HiCcompare, and SpectralTAD anchors. 
+
+```{r setup, echo=FALSE, message=FALSE, warning=FALSE}
+# Set up the environment
+library(knitr)
+opts_chunk$set(cache.path='cache/', fig.path='img/', cache=F, tidy=T, fig.keep='high', echo=F, dpi=100, warnings=F, message=F, comment=NA, warning=F, results='as.is', fig.width = 10, fig.height = 6) #out.width=700, 
+library(pander)
+panderOptions('table.split.table', Inf)
+set.seed(1)
+library(dplyr)
+options(stringsAsFactors = FALSE)
+```
+
+# Libraries
+
+```{r libraries}
+library(readxl)
+library(writexl)
+library(enrichR) # install.packages("enrichR")
+library(annotables) # devtools::install_github("stephenturner/annotables") Annotations of Ensembl IDs
+library(clusterProfiler)
+library(DOSE)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(msigdbr)
+library(HGNChelper) # fix gene names 
+```
+
+```{r settings}
+# Maggie's home directory
+home_dir = '~/Google Drive/My Drive'
+
+# setting parameters
+# parameters for data type
+# data_type = 'Mustache'
+data_type = 'Mustache_v2'
+# data_type = 'HiCcompare'
+# data_type = 'HiCcompare_v1'
+# data_type = 'HiCcompare_v2'
+# data_type = 'SpectralTAD'
+# data_type = 'SpectralTAD_v2'
+# preprocessing type
+preprocessing = 'any'
+# preprocesing = 'equal'
+
+# resolutions parameter, all data types must have four different resolutions (in the case of SpectralTAD, it will have window sizes but will be treated like resolutions)
+###### IMPORTANT! Make sure the resolutions are numbered in order from low resolution to high resolution!!! 
+# for Mustache & HiCcompare
+res1 = "100kb"
+res2 = "50kb"
+res3 = "25kb"
+res4 = "10kb"
+# for SpectralTAD
+# res1 = "500kb"
+# res2 = "200kb"
+# res3 = "100kb"
+# res4 = "50kb"
+
+# Maggie's Paths 
+# Depending on data type and anchor type set the data_dir 
+# if the data_type is Mustache 
+if (data_type == 'Mustache'){
+    # set the data directory
+    data_dir = file.path(home_dir, 'HiC_files/results/Maggie/Mustache_results', paste0('preprocessing_', preprocessing, '/Gene_Annotations/unused'))
+    # set the results directory
+    results_dir = file.path(home_dir, 'HiC_files/results/Maggie/Mustache_results', paste0('preprocessing_', preprocessing, '/Gene_Annotations'))
+} else if (data_type == 'Mustache_v2'){
+    # set the data directory
+    data_dir = file.path(home_dir, 'HiC_files/results/Maggie/Mustache_results_v2', paste0('preprocessing_', preprocessing, '/Gene_Annotations/unused'))
+    # set the results directory
+    results_dir = file.path(home_dir, 'HiC_files/results/Maggie/Mustache_results_v2', paste0('preprocessing_', preprocessing, '/Gene_Annotations'))
+} else if (data_type == "HiCcompare"){
+  # the data type will be HiCcompare
+    # set the data directory
+    data_dir = file.path(home_dir, 'HiC_files/results/Maggie/HiCcompare_results', paste0('preprocessing_', preprocessing, '/Gene_Annotations/unused'))
+    # set the results directory
+    results_dir = file.path(home_dir, 'HiC_files/results/Maggie/HiCcompare_results', paste0('preprocessing_', preprocessing, '/Gene_Annotations'))
+} else if (data_type == "HiCcompare_v1"){
+  # the data type will be HiCcompare_v1
+    # set the data directory
+    data_dir = file.path(home_dir, 'HiC_files/results/Maggie/HiCcompare_results_v1', paste0('preprocessing_', preprocessing, '/Gene_Annotations/unused'))
+    # set the results directory
+    results_dir = file.path(home_dir, 'HiC_files/results/Maggie/HiCcompare_results_v1', paste0('preprocessing_', preprocessing, '/Gene_Annotations'))
+} else if (data_type == "HiCcompare_v2"){
+  # the data type will be HiCcompare_v2
+    # set the data directory
+    data_dir = file.path(home_dir, 'HiC_files/results/Maggie/HiCcompare_results_v2', paste0('preprocessing_', preprocessing, '/Gene_Annotations/unused'))
+    # set the results directory
+    results_dir = file.path(home_dir, 'HiC_files/results/Maggie/HiCcompare_results_v2', paste0('preprocessing_', preprocessing, '/Gene_Annotations'))
+} else if (data_type == "SpectralTAD"){
+  # data type will be SpectralTAD
+  # set the data directory
+    data_dir = file.path(home_dir, 'HiC_files/results/Maggie/TAD_Boundaries_Analysis/SpectralTAD_results', paste0('preprocessing_', preprocessing, '/Gene_Annotations/unused'))
+    # set the results directory
+    results_dir = file.path(home_dir, 'HiC_files/results/Maggie/TAD_Boundaries_Analysis/SpectralTAD_results', paste0('preprocessing_', preprocessing, '/Gene_Annotations'))
+} else if (data_type == "SpectralTAD_v2"){
+  # data type will be SpectralTAD
+  # set the data directory
+    data_dir = file.path(home_dir, 'HiC_files/results/Maggie/TAD_Boundaries_Analysis/SpectralTAD_results_v2', paste0('preprocessing_', preprocessing, '/Gene_Annotations/unused'))
+    # set the results directory
+    results_dir = file.path(home_dir, 'HiC_files/results/Maggie/TAD_Boundaries_Analysis/SpectralTAD_results_v2', paste0('preprocessing_', preprocessing, '/Gene_Annotations'))
+}
+
+min_kegg_genes <- 20 # Minimum number of genes to run enrichment analysis on
+max_kegg_genes <- 3000 # Maximum number of genes to run enrichment analysis on
+
+FDR_cutoff     <- 0.3 # FDR cutoff for DEGs
+p_adj_cutoff   <- 0.3 # FDR cutoff for enrichment results (KEGG)
+# Cutoff for significant MSigDb enrichment
+padj_msigdb_cutoff <- 0.05
+```
+
+# Load in gene annotations for human 
+
+```{r}
+# Mutually exclusive selectors, which analysis should be run. Only one may be TRUE
+human_analysis <- TRUE
+
+# Prepate gene annotations, remove non-canonical chromosome names
+if (human_analysis) {
+  library(org.Hs.eg.db)
+  OrgDb = "org.Hs.eg.db"; species = "hsa"
+  gene_annotations <- grch38[ !(grepl("_", grch38$chr) | grepl("GL", grch38$chr)), c("ensgene", "symbol", "biotype", "description")]
+  gene_annotations <- gene_annotations[ !duplicated(gene_annotations) & !is.na(gene_annotations$symbol) & gene_annotations$description != "" & gene_annotations$biotype == "protein_coding", ]
+  KEGG <- "KEGG_2019_Human"
+  # Gene length for TPM calculations
+  gene_length <- data.frame(Geneid = grch38$ensgene, Length = grch38$end - grch38$start)
+}
+# All genes for background
+all.symbol <- unique(gene_annotations$symbol) 
+
+
+# MSigDb organism
+msigdbr_org <- "Homo sapiens"
+m_df <- msigdbr(species = msigdbr_org)
+m_df_gs_cat <- unique(m_df$gs_cat) %>% sort()
+
+msigdb_enrich <- function(dataset, resolution) {
+  res.msigdf.all <- list()
+  for (gs_cat in m_df_gs_cat) {
+    m_t2g <- msigdbr(species = msigdbr_org, category = gs_cat) %>% dplyr::select(gs_name, human_gene_symbol)
+
+    # Standard enrichment analysis
+    em <- enricher(unique(dataset), TERM2GENE = m_t2g, pvalueCutoff = padj_msigdb_cutoff)
+    # Check if the results are non-empty
+    if (!is.null(em)) {
+      res.msigdf.em <- em@result
+      res.msigdf.em <- add_column(res.msigdf.em, Resolution = resolution, .before = "ID")
+      # sort the genes alphabetically
+      res.msigdf.em <- res.msigdf.em %>% 
+  # separate the rows by splitting by the delimiter and expanding the rows 
+  separate_rows(geneID, convert = TRUE, sep = "/") %>% 
+  # group the genes by their other columns to keep them 
+  group_by(Resolution, ID, Description, GeneRatio, BgRatio, pvalue, p.adjust, qvalue, Count) %>% 
+  # sort the genes for each term 
+  arrange(geneID) %>% 
+  summarise(geneID = paste(geneID, collapse="/")) %>% 
+  arrange(pvalue, p.adjust)
+    } else {
+      res.msigdf.em <- data.frame(Resolution = resolution, Results = "Nothing significant")
+    }
+
+    # Combine the results and add names
+    res.msigdf.all <- c(res.msigdf.all, list(res.msigdf.em))
+    names(res.msigdf.all)[length(res.msigdf.all)] <- paste0("Enrich.", gs_cat)
+    
+  }
+  res.msigdf.all
+}
+```
+
+# Load data of PR, CR, Common genes
+
+```{r}
+PR_genes <- read.table(file.path(data_dir, paste0(data_type,"_PR_specific_combined_resolution_overlapping_genes.bed")), header = TRUE)
+# change column name to "symbol" to match gene annotation for joins
+colnames(PR_genes) <- c("symbol", paste0("X", res4), paste0("X", res3), paste0("X", res2), paste0("X", res1),"resolution_count")
+
+CR_genes <- read.table(file.path(data_dir,paste0(data_type,"_CR_specific_combined_resolution_overlapping_genes.bed")), header = TRUE)
+# change column name to "symbol" to match gene annotation for joins
+colnames(CR_genes) <- c("symbol", paste0("X", res4), paste0("X", res3), paste0("X", res2), paste0("X", res1),"resolution_count")
+
+PR_Common_genes <- read.table(file.path(data_dir,paste0(data_type, "_PR_Common_combined_resolution_overlapping_genes.bed")), header = TRUE)
+# change column name to "symbol" to match gene annotation for joins
+colnames(PR_Common_genes) <- c("symbol", paste0("X", res4), paste0("X", res3), paste0("X", res2), paste0("X", res1),"resolution_count")
+
+CR_Common_genes <- read.table(file.path(data_dir,paste0(data_type, "_CR_Common_combined_resolution_overlapping_genes.bed")), header = TRUE)
+# change column name to "symbol" to match gene annotation for joins
+colnames(CR_Common_genes) <- c("symbol", paste0("X", res4), paste0("X", res3), paste0("X", res2), paste0("X", res1),"resolution_count")
+
+#res <- data.frame(symbol = mtx$gene_name, logFC = mtx$log2FoldChange, p.adj = mtx$padj)
+#res <- res[ order(res$p.adj, decreasing = FALSE), ]
+```
+
+**KEGG pathway Legend:** "ID", "Description" - KEGG pathway ID/description, respectively; "NES" - [normalized enrichment score](http://software.broadinstitute.org/gsea/doc/GSEAUserGuideFrame.html); "pvalue", "p.adjust" - raw and FDR-adjusted p-values, respectively; "core_enrichment" - genes enriched in the corresponding pathway.
+
+# Obtain Gene annotations for the PR, CR, and Common anchor annotations, filter out only the protein coding genes, will make analysis more streamlined 
+
+```{r}
+# Correct gene names
+current_map <- getCurrentHumanMap()
+# Combine the gene list from each condition with the annotated gene list
+# Do left join or right join will yield the same results, because we want the genes that are present in 
+# the condition but also have a gene annotation 
+PR_genes_annotations <- left_join(gene_annotations, PR_genes)
+PR_genes_annotations <- PR_genes_annotations %>% 
+  drop_na() 
+
+# filter out only the genes that are protein_coding 
+PR_genes_annotations <- PR_genes_annotations %>% dplyr::filter(biotype == 'protein_coding')
+# fix gene names 
+genes_checked <- checkGeneSymbols(PR_genes_annotations$symbol, map = current_map)
+PR_genes_annotations$symbol <- genes_checked$Suggested.Symbol
+
+CR_genes_annotations <- left_join(gene_annotations, CR_genes)
+CR_genes_annotations <- CR_genes_annotations %>% drop_na()
+# filter out only the genes that are protein_coding 
+CR_genes_annotations <- CR_genes_annotations %>% dplyr::filter(biotype == 'protein_coding')
+# fix gene names 
+genes_checked <- checkGeneSymbols(CR_genes_annotations$symbol, map = current_map)
+CR_genes_annotations$symbol <- genes_checked$Suggested.Symbol
+
+PR_Common_genes_annotations <- left_join(gene_annotations, PR_Common_genes)
+PR_Common_genes_annotations <- PR_Common_genes_annotations %>% drop_na()
+# filter out only the genes that are protein_coding 
+PR_Common_genes_annotations <- PR_Common_genes_annotations %>% dplyr::filter(biotype == 'protein_coding')
+# fix gene names 
+genes_checked <- checkGeneSymbols(PR_Common_genes_annotations$symbol, map = current_map)
+PR_Common_genes_annotations$symbol <- genes_checked$Suggested.Symbol
+
+CR_Common_genes_annotations <- left_join(gene_annotations, CR_Common_genes)
+CR_Common_genes_annotations <- CR_Common_genes_annotations %>% drop_na()
+# filter out only the genes that are protein_coding 
+CR_Common_genes_annotations <- CR_Common_genes_annotations %>% dplyr::filter(biotype == 'protein_coding')
+# fix gene names 
+genes_checked <- checkGeneSymbols(CR_Common_genes_annotations$symbol, map = current_map)
+CR_Common_genes_annotations$symbol <- genes_checked$Suggested.Symbol
+
+## Write these combined annotations to an excel spreadsheet 
+write_xlsx(PR_genes_annotations, file.path(results_dir, paste0(data_type, "_PR_specific_anchor_overlapping_gene_annotations.xlsx")))
+write_xlsx(CR_genes_annotations, file.path(results_dir, paste0(data_type, "_CR_specific_anchor_overlapping_gene_annotations.xlsx")))
+write_xlsx(PR_Common_genes_annotations, file.path(results_dir, paste0(data_type, "_PR_Common_anchor_overlapping_gene_annotations.xlsx")))
+write_xlsx(CR_Common_genes_annotations, file.path(results_dir, paste0(data_type, "_CR_Common_anchor_overlapping_gene_annotations.xlsx")))
+```
+
+# KEGG Enrichment 
+## KEGG enrichment function 
+
+function to sort out only the significant results from enrichment analysis
+
+```{r}
+kegg_enrich <- function(compartment_genes, p_adj_cutoff = p_adj_cutoff) {
+  res.kegg <- enrichr(unique(compartment_genes), databases = KEGG) # KEGG results only
+  
+  # If significant results are present, save them
+  if (nrow(res.kegg[[KEGG]]) > 0 & sum(res.kegg[[KEGG]]$Adjusted.P.value < p_adj_cutoff) > 0) {
+    res.kegg <- as.data.frame(res.kegg[[KEGG]])
+    res.kegg <- res.kegg[res.kegg$Adjusted.P.value < p_adj_cutoff, , drop = FALSE]
+    compartment_genes <- res.kegg
+    # reorder the genes alphabetically 
+    compartment_genes <- compartment_genes %>% 
+      # separate the rows by splitting by the delimiter and expanding the rows 
+      separate_rows(Genes, convert = TRUE, sep = ";") %>% 
+      # group the genes by their Term & other columns to keep them 
+      group_by(Term, Overlap, P.value, Adjusted.P.value, Old.P.value, Old.Adjusted.P.value,
+               Odds.Ratio, Combined.Score) %>% 
+      # sort the genes for each term 
+      arrange(Genes) %>% 
+      summarise(Genes = paste(Genes, collapse="/")) %>% 
+      arrange(P.value, Adjusted.P.value)
+  } else {
+    compartment_genes <- as.data.frame(matrix(data = "Nothing significant", nrow = 1, ncol = 9))
+    colnames(compartment_genes) <- c("Term", "Overlap", "P.value", "Adjusted.P.value", "Old.P.value", "Old.Adjusted.P.value", "Odds.Ratio", "Combined.Score","Genes")
+    compartment_genes$`P.value` = 0
+    compartment_genes$`Adjusted.P.value` = 0
+    compartment_genes$`Old.P.value` = 0
+    compartment_genes$`Old.Adjusted.P.value` = 0
+    compartment_genes$`Odds.Ratio` = 0
+    compartment_genes$`Combined.Score` = 0
+  }
+  return(compartment_genes)
+}
+```
+
+## All genes 
+
+not sorting by the number of resolutions 
+
+```{r}
+## perform enrichment analysis 
+PR_KEGG_enrichment <- kegg_enrich(PR_genes_annotations$symbol,  p_adj_cutoff = p_adj_cutoff)
+CR_KEGG_enrichment <- kegg_enrich(CR_genes_annotations$symbol,  p_adj_cutoff = p_adj_cutoff)
+PR_Common_KEGG_enrichment <- kegg_enrich(PR_Common_genes_annotations$symbol, p_adj_cutoff = p_adj_cutoff)
+CR_Common_KEGG_enrichment <- kegg_enrich(CR_Common_genes_annotations$symbol, p_adj_cutoff = p_adj_cutoff)
+
+# Change semicolons to backslashes ( ; --> /) for better readability 
+PR_KEGG_enrichment$Genes <- gsub(";", "/", PR_KEGG_enrichment$Genes)
+# Drop unwanted columns Old.P.value and Old.Adjusted.Pvalue 
+PR_KEGG_enrichment <- PR_KEGG_enrichment[ -c(5,6)]
+
+
+CR_KEGG_enrichment$Genes <- gsub(";", "/", CR_KEGG_enrichment$Genes)
+# Drop unwanted columns Old.P.value and Old.Adjusted.Pvalue
+CR_KEGG_enrichment <- CR_KEGG_enrichment[ -c(5,6)]
+
+PR_Common_KEGG_enrichment$Genes <- gsub(";", "/", PR_Common_KEGG_enrichment$Genes)
+# Drop unwanted columns Old.P.value and Old.Adjusted.Pvalue
+PR_Common_KEGG_enrichment <- PR_Common_KEGG_enrichment[ -c(5,6)]
+
+CR_Common_KEGG_enrichment$Genes <- gsub(";", "/", CR_Common_KEGG_enrichment$Genes)
+# Drop unwanted columns Old.P.value and Old.Adjusted.Pvalue 
+CR_Common_KEGG_enrichment <- CR_Common_KEGG_enrichment[ -c(5,6)]
+```
+
+## Genes only in highest resolution / window size
+
+```{r high_res}
+# filter out PR, CR, and Common genes present only at the fourth resolution (the highest resolution)
+# which will be in the 5th column of the dataframe for all data types
+PR_genes_res4 <- PR_genes_annotations %>% dplyr::filter(PR_genes_annotations[[5]] == "+" & 
+                                                          PR_genes_annotations[[6]] == "-" & 
+                                                          PR_genes_annotations[[7]] == "-" & 
+                                                          PR_genes_annotations[[8]] == "-")
+PR_Common_genes_res4 <- PR_Common_genes_annotations %>% 
+  dplyr::filter(PR_Common_genes_annotations[[5]] == "+" & 
+                                                          PR_Common_genes_annotations[[6]] == "-" & 
+                                                          PR_Common_genes_annotations[[7]] == "-" & 
+                                                          PR_Common_genes_annotations[[8]] == "-")
+CR_Common_genes_res4 <- CR_Common_genes_annotations %>% dplyr::filter(CR_Common_genes_annotations[[5]] == "+" & 
+                                                          CR_Common_genes_annotations[[6]] == "-" & 
+                                                          CR_Common_genes_annotations[[7]] == "-" & 
+                                                          CR_Common_genes_annotations[[8]] == "-")
+CR_genes_res4 <- CR_genes_annotations %>% dplyr::filter(CR_genes_annotations[[5]] == "+" & 
+                                                          CR_genes_annotations[[6]] == "-" & 
+                                                          CR_genes_annotations[[7]] == "-" & 
+                                                          CR_genes_annotations[[8]] == "-")
+
+## perform enrichment analysis 
+PR_KEGG_enrichment_res4 <- kegg_enrich(PR_genes_res4$symbol,  p_adj_cutoff = p_adj_cutoff)
+CR_KEGG_enrichment_res4 <- kegg_enrich(CR_genes_res4$symbol,  p_adj_cutoff = p_adj_cutoff)
+PR_Common_KEGG_enrichment_res4 <- kegg_enrich(PR_Common_genes_res4$symbol, p_adj_cutoff = p_adj_cutoff)
+CR_Common_KEGG_enrichment_res4 <- kegg_enrich(CR_Common_genes_res4$symbol, p_adj_cutoff = p_adj_cutoff)
+
+# Change semicolons to backslashes ( ; --> /) for better readability 
+PR_KEGG_enrichment_res4$Genes <- gsub(";", "/", PR_KEGG_enrichment_res4$Genes)
+# Drop unwanted columns Old.P.value and Old.Adjusted.Pvalue and 
+PR_KEGG_enrichment_res4 <- PR_KEGG_enrichment_res4[ -c(5,6)]
+
+
+CR_KEGG_enrichment_res4$Genes <- gsub(";", "/", CR_KEGG_enrichment_res4$Genes)
+# Drop unwanted columns Old.P.value and Old.Adjusted.Pvalue and 
+CR_KEGG_enrichment_res4 <- CR_KEGG_enrichment_res4[ -c(5,6)]
+
+PR_Common_KEGG_enrichment_res4$Genes <- gsub(";", "/", PR_Common_KEGG_enrichment_res4$Genes)
+# Drop unwanted columns Old.P.value and Old.Adjusted.Pvalue and 
+PR_Common_KEGG_enrichment_res4 <- PR_Common_KEGG_enrichment_res4[ -c(5,6)]
+
+CR_Common_KEGG_enrichment_res4$Genes <- gsub(";", "/", CR_Common_KEGG_enrichment_res4$Genes)
+# Drop unwanted columns Old.P.value and Old.Adjusted.Pvalue
+CR_Common_KEGG_enrichment_res4 <- CR_Common_KEGG_enrichment_res4[ -c(5,6)]
+```
+
+## Genes only in 2nd highest resolution / window size 
+
+```{r sec_high_res}
+# filter out PR, CR, and Common genes present only at the third resolution (the 2nd highest resolution)
+# which will be in the 6th column of the dataframe for all data types
+PR_genes_res3 <- PR_genes_annotations %>% dplyr::filter(PR_genes_annotations[[5]] == "-" & 
+                                                          PR_genes_annotations[[6]] == "+" & 
+                                                          PR_genes_annotations[[7]] == "-" & 
+                                                          PR_genes_annotations[[8]] == "-")
+PR_Common_genes_res3 <- PR_Common_genes_annotations %>% 
+  dplyr::filter(PR_Common_genes_annotations[[5]] == "-" & 
+                                                          PR_Common_genes_annotations[[6]] == "+" & 
+                                                          PR_Common_genes_annotations[[7]] == "-" & 
+                                                          PR_Common_genes_annotations[[8]] == "-")
+CR_Common_genes_res3 <- CR_Common_genes_annotations %>% dplyr::filter(CR_Common_genes_annotations[[5]] == "-" & 
+                                                          CR_Common_genes_annotations[[6]] == "+" & 
+                                                          CR_Common_genes_annotations[[7]] == "-" & 
+                                                          CR_Common_genes_annotations[[8]] == "-")
+CR_genes_res3 <- CR_genes_annotations %>% dplyr::filter(CR_genes_annotations[[5]] == "-" & 
+                                                          CR_genes_annotations[[6]] == "+" & 
+                                                          CR_genes_annotations[[7]] == "-" & 
+                                                          CR_genes_annotations[[8]] == "-")
+
+## perform enrichment analysis 
+PR_KEGG_enrichment_res3 <- kegg_enrich(PR_genes_res3$symbol,  p_adj_cutoff = p_adj_cutoff)
+CR_KEGG_enrichment_res3 <- kegg_enrich(CR_genes_res3$symbol,  p_adj_cutoff = p_adj_cutoff)
+PR_Common_KEGG_enrichment_res3 <- kegg_enrich(PR_Common_genes_res3$symbol, p_adj_cutoff = p_adj_cutoff)
+CR_Common_KEGG_enrichment_res3 <- kegg_enrich(CR_Common_genes_res3$symbol, p_adj_cutoff = p_adj_cutoff)
+
+# Change semicolons to backslashes ( ; --> /) for better readability 
+PR_KEGG_enrichment_res3$Genes <- gsub(";", "/", PR_KEGG_enrichment_res3$Genes)
+# Drop unwanted columns Old.P.value and Old.Adjusted.Pvalue 
+PR_KEGG_enrichment_res3 <- PR_KEGG_enrichment_res3[ -c(5,6)]
+
+
+CR_KEGG_enrichment_res3$Genes <- gsub(";", "/", CR_KEGG_enrichment_res3$Genes)
+# Drop unwanted columns Old.P.value and Old.Adjusted.Pvalue 
+CR_KEGG_enrichment_res3 <- CR_KEGG_enrichment_res3[ -c(5,6)]
+
+PR_Common_KEGG_enrichment_res3$Genes <- gsub(";", "/", PR_Common_KEGG_enrichment_res3$Genes)
+# Drop unwanted columns Old.P.value and Old.Adjusted.Pvalue 
+PR_Common_KEGG_enrichment_res3 <- PR_Common_KEGG_enrichment_res3[ -c(5,6)]
+
+CR_Common_KEGG_enrichment_res3$Genes <- gsub(";", "/", CR_Common_KEGG_enrichment_res3$Genes)
+# Drop unwanted columns Old.P.value and Old.Adjusted.Pvalue 
+CR_Common_KEGG_enrichment_res3 <- CR_Common_KEGG_enrichment_res3[ -c(5,6)]
+```
+
+## Genes only in 3rd highest resolution / window size 
+
+```{r third_high_res}
+# filter out PR, CR, and Common genes present only at the second resolution (the 3rd highest resolution)
+# which will be in the 7th column of the dataframe for all data types
+PR_genes_res2 <- PR_genes_annotations %>% dplyr::filter(PR_genes_annotations[[5]] == "-" & 
+                                                          PR_genes_annotations[[6]] == "-" & 
+                                                          PR_genes_annotations[[7]] == "+" & 
+                                                          PR_genes_annotations[[8]] == "-")
+PR_Common_genes_res2 <- PR_Common_genes_annotations %>% 
+  dplyr::filter(PR_Common_genes_annotations[[5]] == "-" & 
+                                                          PR_Common_genes_annotations[[6]] == "-" & 
+                                                          PR_Common_genes_annotations[[7]] == "+" & 
+                                                          PR_Common_genes_annotations[[8]] == "-")
+CR_Common_genes_res2 <- CR_Common_genes_annotations %>% dplyr::filter(CR_Common_genes_annotations[[5]] == "-" & 
+                                                          CR_Common_genes_annotations[[6]] == "-" & 
+                                                          CR_Common_genes_annotations[[7]] == "+" & 
+                                                          CR_Common_genes_annotations[[8]] == "-")
+CR_genes_res2 <- CR_genes_annotations %>% dplyr::filter(CR_genes_annotations[[5]] == "-" & 
+                                                          CR_genes_annotations[[6]] == "-" & 
+                                                          CR_genes_annotations[[7]] == "+" & 
+                                                          CR_genes_annotations[[8]] == "-")
+
+## perform enrichment analysis 
+PR_KEGG_enrichment_res2 <- kegg_enrich(PR_genes_res2$symbol,  p_adj_cutoff = p_adj_cutoff)
+CR_KEGG_enrichment_res2 <- kegg_enrich(CR_genes_res2$symbol,  p_adj_cutoff = p_adj_cutoff)
+PR_Common_KEGG_enrichment_res2 <- kegg_enrich(PR_Common_genes_res2$symbol, p_adj_cutoff = p_adj_cutoff)
+CR_Common_KEGG_enrichment_res2 <- kegg_enrich(CR_Common_genes_res2$symbol, p_adj_cutoff = p_adj_cutoff)
+
+# Change semicolons to backslashes ( ; --> /) for better readability 
+PR_KEGG_enrichment_res2$Genes <- gsub(";", "/", PR_KEGG_enrichment_res2$Genes)
+# Drop unwanted columns Old.P.value and Old.Adjusted.Pvalue 
+PR_KEGG_enrichment_res2 <- PR_KEGG_enrichment_res2[ -c(5,6)]
+
+CR_KEGG_enrichment_res2$Genes <- gsub(";", "/", CR_KEGG_enrichment_res2$Genes)
+# Drop unwanted columns Old.P.value and Old.Adjusted.Pvalue 
+CR_KEGG_enrichment_res2 <- CR_KEGG_enrichment_res2[ -c(5,6)]
+
+PR_Common_KEGG_enrichment_res2$Genes <- gsub(";", "/", PR_Common_KEGG_enrichment_res2$Genes)
+# Drop unwanted columns Old.P.value and Old.Adjusted.Pvalue 
+PR_Common_KEGG_enrichment_res2 <- PR_Common_KEGG_enrichment_res2[ -c(5,6)]
+
+CR_Common_KEGG_enrichment_res2$Genes <- gsub(";", "/", CR_Common_KEGG_enrichment_res2$Genes)
+# Drop unwanted columns Old.P.value and Old.Adjusted.Pvalue 
+CR_Common_KEGG_enrichment_res2 <- CR_Common_KEGG_enrichment_res2[ -c(5,6)]
+```
+
+## Genes only in lowest resolution / window size 
+
+```{r lowest_res}
+# filter out PR, CR, and Common genes present only at the fourth resolution (the lowest resolution)
+# which will be in the 8th column of the dataframe for all data types
+PR_genes_res1 <- PR_genes_annotations %>% dplyr::filter(PR_genes_annotations[[5]] == "-" & 
+                                                          PR_genes_annotations[[6]] == "-" & 
+                                                          PR_genes_annotations[[7]] == "-" & 
+                                                          PR_genes_annotations[[8]] == "+")
+PR_Common_genes_res1 <- PR_Common_genes_annotations %>% 
+  dplyr::filter(PR_Common_genes_annotations[[5]] == "-" & 
+                                                          PR_Common_genes_annotations[[6]] == "-" & 
+                                                          PR_Common_genes_annotations[[7]] == "-" & 
+                                                          PR_Common_genes_annotations[[8]] == "+")
+CR_Common_genes_res1 <- CR_Common_genes_annotations %>% dplyr::filter(CR_Common_genes_annotations[[5]] == "-" & 
+                                                          CR_Common_genes_annotations[[6]] == "-" & 
+                                                          CR_Common_genes_annotations[[7]] == "-" & 
+                                                          CR_Common_genes_annotations[[8]] == "+")
+CR_genes_res1 <- CR_genes_annotations %>% dplyr::filter(CR_genes_annotations[[5]] == "-" & 
+                                                          CR_genes_annotations[[6]] == "-" & 
+                                                          CR_genes_annotations[[7]] == "-" & 
+                                                          CR_genes_annotations[[8]] == "+")
+
+## perform enrichment analysis 
+PR_KEGG_enrichment_res1 <- kegg_enrich(PR_genes_res1$symbol,  p_adj_cutoff = p_adj_cutoff)
+CR_KEGG_enrichment_res1 <- kegg_enrich(CR_genes_res1$symbol,  p_adj_cutoff = p_adj_cutoff)
+PR_Common_KEGG_enrichment_res1 <- kegg_enrich(PR_Common_genes_res1$symbol, p_adj_cutoff = p_adj_cutoff)
+CR_Common_KEGG_enrichment_res1 <- kegg_enrich(CR_Common_genes_res1$symbol, p_adj_cutoff = p_adj_cutoff)
+
+# Change semicolons to backslashes ( ; --> /) for better readability 
+PR_KEGG_enrichment_res1$Genes <- gsub(";", "/", PR_KEGG_enrichment_res1$Genes)
+# Drop unwanted columns Old.P.value and Old.Adjusted.Pvalue 
+PR_KEGG_enrichment_res1 <- PR_KEGG_enrichment_res1[ -c(5,6)]
+
+
+CR_KEGG_enrichment_res1$Genes <- gsub(";", "/", CR_KEGG_enrichment_res1$Genes)
+# Drop unwanted columns Old.P.value and Old.Adjusted.Pvalue 
+CR_KEGG_enrichment_res1 <- CR_KEGG_enrichment_res1[ -c(5,6)]
+
+PR_Common_KEGG_enrichment_res1$Genes <- gsub(";", "/", PR_Common_KEGG_enrichment_res1$Genes)
+# Drop unwanted columns Old.P.value and Old.Adjusted.Pvalue 
+PR_Common_KEGG_enrichment_res1 <- PR_Common_KEGG_enrichment_res1[ -c(5,6)]
+
+CR_Common_KEGG_enrichment_res1$Genes <- gsub(";", "/", CR_Common_KEGG_enrichment_res1$Genes)
+# Drop unwanted columns Old.P.value and Old.Adjusted.Pvalue 
+CR_Common_KEGG_enrichment_res1 <- CR_Common_KEGG_enrichment_res1[ -c(5,6)]
+```
+
+## Genes in 4 resolutions  
+
+```{r four_res}
+## Filter out PR, CR, and Common genes that are present in 4 resolutions 
+PR_genes_4_res <- PR_genes_annotations %>% dplyr::filter(resolution_count == 4)
+# Get the length, the number of genes detected at this resolution count 
+PR_genes_4_res_count <- length(PR_genes_4_res$symbol)
+CR_genes_4_res <- CR_genes_annotations %>% dplyr::filter(resolution_count == 4)
+CR_genes_4_res_count <- length(CR_genes_4_res$symbol)
+PR_Common_genes_4_res <- PR_Common_genes_annotations %>% dplyr::filter(resolution_count == 4)
+PR_Common_genes_4_res_count <- length(PR_Common_genes_4_res$symbol)
+CR_Common_genes_4_res <- CR_Common_genes_annotations %>% dplyr::filter(resolution_count == 4)
+CR_Common_genes_4_res_count <- length(CR_Common_genes_4_res$symbol)
+
+# Run KEGG Enrichment analysis for each condition 
+KEGG_PR_4 <- kegg_enrich(PR_genes_4_res$symbol,  p_adj_cutoff = p_adj_cutoff)
+# Add identifier for what resolution count this enrichment was run on 
+KEGG_PR_4 <- add_column(KEGG_PR_4, Resolution = 4, .before = "Term")
+KEGG_CR_4 <- kegg_enrich(CR_genes_4_res$symbol,  p_adj_cutoff = p_adj_cutoff)
+KEGG_CR_4 <- add_column(KEGG_CR_4, Resolution = 4, .before = "Term")
+KEGG_PR_Common_4 <- kegg_enrich(PR_Common_genes_4_res$symbol,  p_adj_cutoff = p_adj_cutoff)
+KEGG_PR_Common_4 <- add_column(KEGG_PR_Common_4, Resolution = 4, .before = "Term")
+KEGG_CR_Common_4 <- kegg_enrich(CR_Common_genes_4_res$symbol,  p_adj_cutoff = p_adj_cutoff)
+KEGG_CR_Common_4 <- add_column(KEGG_CR_Common_4, Resolution = 4, .before = "Term")
+```
+
+## Genes in 3 resolutions  
+
+```{r three_res}
+## Filter out PR, CR, and Common genes that are present in 3 resolutions 
+PR_genes_3_res <- PR_genes_annotations %>% dplyr::filter(resolution_count == 3)
+# Get the length, the number of genes detected at this resolution count 
+PR_genes_3_res_count <- length(PR_genes_3_res$symbol)
+CR_genes_3_res <- CR_genes_annotations %>% dplyr::filter(resolution_count == 3)
+CR_genes_3_res_count <- length(CR_genes_3_res$symbol)
+PR_Common_genes_3_res <- PR_Common_genes_annotations %>% dplyr::filter(resolution_count == 3)
+PR_Common_genes_3_res_count <- length(PR_Common_genes_3_res$symbol)
+CR_Common_genes_3_res <- CR_Common_genes_annotations %>% dplyr::filter(resolution_count == 3)
+CR_Common_genes_3_res_count <- length(CR_Common_genes_3_res$symbol)
+
+# Run KEGG Enrichment analysis for each condition 
+KEGG_PR_3 <- kegg_enrich(PR_genes_3_res$symbol,  p_adj_cutoff = p_adj_cutoff)
+# Add identifier for what resolution count this enrichment was run on 
+KEGG_PR_3 <- add_column(KEGG_PR_3, Resolution = 3, .before = "Term")
+KEGG_CR_3 <- kegg_enrich(CR_genes_3_res$symbol,  p_adj_cutoff = p_adj_cutoff)
+KEGG_CR_3 <- add_column(KEGG_CR_3, Resolution = 3, .before = "Term")
+KEGG_PR_Common_3 <- kegg_enrich(PR_Common_genes_3_res$symbol,  p_adj_cutoff = p_adj_cutoff)
+KEGG_PR_Common_3 <- add_column(KEGG_PR_Common_3, Resolution = 3, .before = "Term")
+KEGG_CR_Common_3 <- kegg_enrich(CR_Common_genes_3_res$symbol,  p_adj_cutoff = p_adj_cutoff)
+KEGG_CR_Common_3 <- add_column(KEGG_CR_Common_3, Resolution = 3, .before = "Term")
+```
+
+## Genes in 2 resolutions  
+
+```{r two_res}
+## Filter out PR, CR, and Common genes that are present in 2 resolutions 
+PR_genes_2_res <- PR_genes_annotations %>% dplyr::filter(resolution_count == 2)
+# Get the length, the number of genes detected at this resolution count 
+PR_genes_2_res_count <- length(PR_genes_2_res$symbol)
+CR_genes_2_res <- CR_genes_annotations %>% dplyr::filter(resolution_count == 2)
+CR_genes_2_res_count <- length(CR_genes_2_res$symbol)
+PR_Common_genes_2_res <- PR_Common_genes_annotations %>% dplyr::filter(resolution_count == 2)
+PR_Common_genes_2_res_count <- length(PR_Common_genes_2_res$symbol)
+CR_Common_genes_2_res <- CR_Common_genes_annotations %>% dplyr::filter(resolution_count == 2)
+CR_Common_genes_2_res_count <- length(CR_Common_genes_2_res$symbol)
+
+# Run KEGG Enrichment analysis for each condition 
+KEGG_PR_2 <- kegg_enrich(PR_genes_2_res$symbol,  p_adj_cutoff = p_adj_cutoff)
+# Add identifier for what resolution count this enrichment was run on 
+KEGG_PR_2 <- add_column(KEGG_PR_2, Resolution = 2, .before = "Term")
+KEGG_CR_2 <- kegg_enrich(CR_genes_2_res$symbol,  p_adj_cutoff = p_adj_cutoff)
+KEGG_CR_2 <- add_column(KEGG_CR_2, Resolution = 2, .before = "Term")
+KEGG_PR_Common_2 <- kegg_enrich(PR_Common_genes_2_res$symbol,  p_adj_cutoff = p_adj_cutoff)
+KEGG_PR_Common_2 <- add_column(KEGG_PR_Common_2, Resolution = 2, .before = "Term")
+KEGG_CR_Common_2 <- kegg_enrich(CR_Common_genes_2_res$symbol,  p_adj_cutoff = p_adj_cutoff)
+KEGG_CR_Common_2 <- add_column(KEGG_CR_Common_2, Resolution = 2, .before = "Term")
+```
+
+## Genes in 1 resolution  
+
+```{r one_res}
+## Filter out PR, CR, and Common genes that are present in 1 resolutions 
+PR_genes_1_res <- PR_genes_annotations %>% dplyr::filter(resolution_count == 1)
+# Get the length, the number of genes detected at this resolution count 
+PR_genes_1_res_count <- length(PR_genes_1_res$symbol)
+CR_genes_1_res <- CR_genes_annotations %>% dplyr::filter(resolution_count == 1)
+CR_genes_1_res_count <- length(CR_genes_1_res$symbol)
+PR_Common_genes_1_res <- PR_Common_genes_annotations %>% dplyr::filter(resolution_count == 1)
+PR_Common_genes_1_res_count <- length(PR_Common_genes_1_res$symbol)
+CR_Common_genes_1_res <- CR_Common_genes_annotations %>% dplyr::filter(resolution_count == 1)
+CR_Common_genes_1_res_count <- length(CR_Common_genes_1_res$symbol)
+
+# Run KEGG Enrichment analysis for each condition 
+KEGG_PR_1 <- kegg_enrich(PR_genes_1_res$symbol,  p_adj_cutoff = p_adj_cutoff)
+# Add identifier for what resolution count this enrichment was run on 
+KEGG_PR_1 <- add_column(KEGG_PR_1, Resolution = 1, .before = "Term")
+KEGG_CR_1 <- kegg_enrich(CR_genes_1_res$symbol,  p_adj_cutoff = p_adj_cutoff)
+KEGG_CR_1 <- add_column(KEGG_CR_1, Resolution = 1, .before = "Term")
+KEGG_PR_Common_1 <- kegg_enrich(PR_Common_genes_1_res$symbol,  p_adj_cutoff = p_adj_cutoff)
+KEGG_PR_Common_1 <- add_column(KEGG_PR_Common_1, Resolution = 1, .before = "Term")
+KEGG_CR_Common_1 <- kegg_enrich(CR_Common_genes_1_res$symbol,  p_adj_cutoff = p_adj_cutoff)
+KEGG_CR_Common_1 <- add_column(KEGG_CR_Common_1, Resolution = 1, .before = "Term")
+```
+
+## Combine KEGG Enrichments 
+all four different resolution counts into condition-specific tables 
+
+``` {r}
+PR_KEGG_ALL <- rbind(KEGG_PR_4,KEGG_PR_3, KEGG_PR_2 , KEGG_PR_1)
+CR_KEGG_ALL <- rbind(KEGG_CR_4,KEGG_CR_3, KEGG_CR_2 , KEGG_CR_1)
+PR_COMMON_KEGG_ALL <- rbind(KEGG_PR_Common_4, KEGG_PR_Common_3, KEGG_PR_Common_2 , KEGG_PR_Common_1)
+CR_COMMON_KEGG_ALL <- rbind(KEGG_CR_Common_4, KEGG_CR_Common_3, KEGG_CR_Common_2 , KEGG_CR_Common_1)
+
+# substitute the ; for /, better readability 
+PR_KEGG_ALL$Genes <- gsub(";", "/", PR_KEGG_ALL$Genes)
+CR_KEGG_ALL$Genes <- gsub(";", "/", CR_KEGG_ALL$Genes)
+PR_COMMON_KEGG_ALL$Genes <- gsub(";", "/", PR_COMMON_KEGG_ALL$Genes)
+CR_COMMON_KEGG_ALL$Genes <- gsub(";", "/", CR_COMMON_KEGG_ALL$Genes)
+
+# drop unwanted columns "Old.P.value" and "Adjusted.Old.P.value"
+PR_KEGG_ALL <- PR_KEGG_ALL[ -c(6,7)]
+CR_KEGG_ALL <- CR_KEGG_ALL[ -c(6,7)]
+PR_COMMON_KEGG_ALL <- PR_COMMON_KEGG_ALL[ -c(6,7)]
+CR_COMMON_KEGG_ALL <- CR_COMMON_KEGG_ALL[ -c(6,7)]
+```
+
+# MSigDb Enrichment 
+
+## All genes 
+
+```{r msigall}
+PR_MSIG_enrichment <- msigdb_enrich(PR_genes_annotations$symbol,  resolution = 0)
+CR_MSIG_enrichment <- msigdb_enrich(CR_genes_annotations$symbol, resolution = 0)
+PR_Common_MSIG_enrichment <- msigdb_enrich(PR_Common_genes_annotations$symbol, resolution = 0)
+CR_Common_MSIG_enrichment <- msigdb_enrich(CR_Common_genes_annotations$symbol, resolution = 0 )
+```
+
+## Genes only in highest resolution (res4)
+
+```{r msighighestres}
+PR_MSIG_enrichment_res4 <- msigdb_enrich(PR_genes_res4$symbol,  resolution = res4)
+CR_MSIG_enrichment_res4 <- msigdb_enrich(CR_genes_res4$symbol, resolution = res4)
+PR_Common_MSIG_enrichment_res4 <- msigdb_enrich(PR_Common_genes_res4$symbol, resolution = res4)
+CR_Common_MSIG_enrichment_res4 <- msigdb_enrich(CR_Common_genes_res4$symbol, resolution = res4)
+```
+
+## Genes only in res3 
+
+```{r msigres3}
+PR_MSIG_enrichment_res3 <- msigdb_enrich(PR_genes_res3$symbol,  resolution = res3)
+CR_MSIG_enrichment_res3 <- msigdb_enrich(CR_genes_res3$symbol, resolution = res3)
+PR_Common_MSIG_enrichment_res3 <- msigdb_enrich(PR_Common_genes_res3$symbol, resolution = res3)
+CR_Common_MSIG_enrichment_res3 <- msigdb_enrich(CR_Common_genes_res3$symbol, resolution = res3)
+```
+
+## Genes only in res2
+
+```{r msigres2}
+PR_MSIG_enrichment_res2 <- msigdb_enrich(PR_genes_res2$symbol,  resolution = res2)
+CR_MSIG_enrichment_res2 <- msigdb_enrich(CR_genes_res2$symbol, resolution = res2)
+PR_Common_MSIG_enrichment_res2 <- msigdb_enrich(PR_Common_genes_res2$symbol, resolution = res2)
+CR_Common_MSIG_enrichment_res2 <- msigdb_enrich(CR_Common_genes_res2$symbol, resolution = res2)
+```
+
+## Genes only in res1
+
+```{r msigres1}
+PR_MSIG_enrichment_res1 <- msigdb_enrich(PR_genes_res1$symbol,  resolution = res1)
+CR_MSIG_enrichment_res1 <- msigdb_enrich(CR_genes_res1$symbol, resolution = res1)
+PR_Common_MSIG_enrichment_res1 <- msigdb_enrich(PR_Common_genes_res1$symbol, resolution = res1)
+CR_Common_MSIG_enrichment_res1 <- msigdb_enrich(CR_Common_genes_res1$symbol, resolution = res1)
+```
+
+## Genes in 4 resolutions 
+
+```{r msig4res}
+# Run Enrichment analysis for each condition 
+MSIG_PR_4 <- msigdb_enrich(PR_genes_4_res$symbol, resolution = 4)
+MSIG_CR_4 <- msigdb_enrich(CR_genes_4_res$symbol, resolution = 4)
+MSIG_PR_Common_4 <- msigdb_enrich(PR_Common_genes_4_res$symbol, resolution = 4)
+MSIG_CR_Common_4 <- msigdb_enrich(CR_Common_genes_4_res$symbol, resolution = 4)
+```
+
+##  Genes in 3 resolutions 
+
+```{r msig3res}
+# Run Enrichment analysis for each condition 
+MSIG_PR_3 <- msigdb_enrich(PR_genes_3_res$symbol, resolution = 3)
+MSIG_CR_3 <- msigdb_enrich(CR_genes_3_res$symbol, resolution = 3)
+MSIG_PR_Common_3 <- msigdb_enrich(PR_Common_genes_3_res$symbol, resolution = 3)
+MSIG_CR_Common_3 <- msigdb_enrich(CR_Common_genes_3_res$symbol, resolution = 3)
+```
+
+## Genes in 2 resolutions 
+
+```{r msig2res}
+# Run Enrichment analysis for each condition 
+MSIG_PR_2 <- msigdb_enrich(PR_genes_2_res$symbol, resolution = 2)
+MSIG_CR_2 <- msigdb_enrich(CR_genes_2_res$symbol, resolution = 2)
+MSIG_PR_Common_2 <- msigdb_enrich(PR_Common_genes_2_res$symbol, resolution = 2)
+MSIG_CR_Common_2 <- msigdb_enrich(CR_Common_genes_2_res$symbol, resolution = 2)
+```
+
+## Genes in 1 resolution 
+
+```{r msig1res}
+# Run Enrichment analysis for each condition 
+MSIG_PR_1 <- msigdb_enrich(PR_genes_1_res$symbol, resolution = 1)
+MSIG_CR_1 <- msigdb_enrich(CR_genes_1_res$symbol, resolution = 1)
+MSIG_PR_Common_1 <- msigdb_enrich(PR_Common_genes_1_res$symbol, resolution = 1)
+MSIG_CR_Common_1 <- msigdb_enrich(CR_Common_genes_1_res$symbol, resolution = 1)
+```
+
+## Combine MSigDB results 
+all four different resolution counts into condition-specific tables 
+
+``` {r msigcombine}
+PR_MSIG_C1 <- rbind(MSIG_PR_1$Enrich.C1, MSIG_PR_2$Enrich.C1, MSIG_PR_3$Enrich.C1, MSIG_PR_4$Enrich.C1)
+PR_MSIG_C2 <- rbind(MSIG_PR_1$Enrich.C2, MSIG_PR_2$Enrich.C2, MSIG_PR_3$Enrich.C2, MSIG_PR_4$Enrich.C2)
+PR_MSIG_C3 <- rbind(MSIG_PR_1$Enrich.C3, MSIG_PR_2$Enrich.C3, MSIG_PR_3$Enrich.C3, MSIG_PR_4$Enrich.C3)
+PR_MSIG_C4 <- rbind(MSIG_PR_1$Enrich.C4, MSIG_PR_2$Enrich.C4, MSIG_PR_3$Enrich.C4, MSIG_PR_4$Enrich.C4)
+PR_MSIG_C5 <- rbind(MSIG_PR_1$Enrich.C5, MSIG_PR_2$Enrich.C5, MSIG_PR_3$Enrich.C5, MSIG_PR_4$Enrich.C5)
+PR_MSIG_C6 <- rbind(MSIG_PR_1$Enrich.C6, MSIG_PR_2$Enrich.C6, MSIG_PR_3$Enrich.C6, MSIG_PR_4$Enrich.C6)
+PR_MSIG_C7 <- rbind(MSIG_PR_1$Enrich.C7, MSIG_PR_2$Enrich.C7, MSIG_PR_3$Enrich.C7, MSIG_PR_4$Enrich.C7)
+PR_MSIG_C8 <- rbind(MSIG_PR_1$Enrich.C8, MSIG_PR_2$Enrich.C8, MSIG_PR_3$Enrich.C8, MSIG_PR_4$Enrich.C8)
+PR_MSIG_H <- rbind(MSIG_PR_1$Enrich.H, MSIG_PR_2$Enrich.H, MSIG_PR_3$Enrich.H, MSIG_PR_4$Enrich.H)
+
+
+CR_MSIG_C1 <- rbind(MSIG_CR_1$Enrich.C1, MSIG_CR_2$Enrich.C1, MSIG_CR_3$Enrich.C1, MSIG_CR_4$Enrich.C1)
+CR_MSIG_C2 <- rbind(MSIG_CR_1$Enrich.C2, MSIG_CR_2$Enrich.C2, MSIG_CR_3$Enrich.C2, MSIG_CR_4$Enrich.C2)
+CR_MSIG_C3 <- rbind(MSIG_CR_1$Enrich.C3, MSIG_CR_2$Enrich.C3, MSIG_CR_3$Enrich.C3, MSIG_CR_4$Enrich.C3)
+CR_MSIG_C4 <- rbind(MSIG_CR_1$Enrich.C4, MSIG_CR_2$Enrich.C4, MSIG_CR_3$Enrich.C4, MSIG_CR_4$Enrich.C4)
+CR_MSIG_C5 <- rbind(MSIG_CR_1$Enrich.C5, MSIG_CR_2$Enrich.C5, MSIG_CR_3$Enrich.C5, MSIG_CR_4$Enrich.C5)
+CR_MSIG_C6 <- rbind(MSIG_CR_1$Enrich.C6, MSIG_CR_2$Enrich.C6, MSIG_CR_3$Enrich.C6, MSIG_CR_4$Enrich.C6)
+CR_MSIG_C7 <- rbind(MSIG_CR_1$Enrich.C7, MSIG_CR_2$Enrich.C7, MSIG_CR_3$Enrich.C7, MSIG_CR_4$Enrich.C7)
+CR_MSIG_C8 <- rbind(MSIG_CR_1$Enrich.C8, MSIG_CR_2$Enrich.C8, MSIG_CR_3$Enrich.C8, MSIG_CR_4$Enrich.C8)
+CR_MSIG_H <- rbind(MSIG_CR_1$Enrich.H, MSIG_CR_2$Enrich.H, MSIG_CR_3$Enrich.H, MSIG_CR_4$Enrich.H)
+
+
+PR_Common_MSIG_C1 <- rbind(MSIG_PR_Common_1$Enrich.C1, MSIG_PR_Common_2$Enrich.C1, MSIG_PR_Common_3$Enrich.C1, MSIG_PR_Common_4$Enrich.C1)
+PR_Common_MSIG_C2 <- rbind(MSIG_PR_Common_1$Enrich.C2, MSIG_PR_Common_2$Enrich.C2, MSIG_PR_Common_3$Enrich.C2, MSIG_PR_Common_4$Enrich.C2)
+PR_Common_MSIG_C3 <- rbind(MSIG_PR_Common_1$Enrich.C3, MSIG_PR_Common_2$Enrich.C3, MSIG_PR_Common_3$Enrich.C3, MSIG_PR_Common_4$Enrich.C3)
+PR_Common_MSIG_C4 <- rbind(MSIG_PR_Common_1$Enrich.C4, MSIG_PR_Common_2$Enrich.C4, MSIG_PR_Common_3$Enrich.C4, MSIG_PR_Common_4$Enrich.C4)
+PR_Common_MSIG_C5 <- rbind(MSIG_PR_Common_1$Enrich.C5, MSIG_PR_Common_2$Enrich.C5, MSIG_PR_Common_3$Enrich.C5, MSIG_PR_Common_4$Enrich.C5)
+PR_Common_MSIG_C6 <- rbind(MSIG_PR_Common_1$Enrich.C6, MSIG_PR_Common_2$Enrich.C6, MSIG_PR_Common_3$Enrich.C6, MSIG_PR_Common_4$Enrich.C6)
+PR_Common_MSIG_C7 <- rbind(MSIG_PR_Common_1$Enrich.C7, MSIG_PR_Common_2$Enrich.C7, MSIG_PR_Common_3$Enrich.C7, MSIG_PR_Common_4$Enrich.C7)
+PR_Common_MSIG_C8 <- rbind(MSIG_PR_Common_1$Enrich.C8, MSIG_PR_Common_2$Enrich.C8, MSIG_PR_Common_3$Enrich.C8, MSIG_PR_Common_4$Enrich.C8)
+PR_Common_MSIG_H <- rbind(MSIG_PR_Common_1$Enrich.H, MSIG_PR_Common_2$Enrich.H, MSIG_PR_Common_3$Enrich.H, MSIG_PR_Common_4$Enrich.H)
+
+CR_Common_MSIG_C1 <- rbind(MSIG_CR_Common_1$Enrich.C1, MSIG_CR_Common_2$Enrich.C1, MSIG_CR_Common_3$Enrich.C1, MSIG_CR_Common_4$Enrich.C1)
+CR_Common_MSIG_C2 <- rbind(MSIG_CR_Common_1$Enrich.C2, MSIG_CR_Common_2$Enrich.C2, MSIG_CR_Common_3$Enrich.C2, MSIG_CR_Common_4$Enrich.C2)
+CR_Common_MSIG_C3 <- rbind(MSIG_CR_Common_1$Enrich.C3, MSIG_CR_Common_2$Enrich.C3, MSIG_CR_Common_3$Enrich.C3, MSIG_CR_Common_4$Enrich.C3)
+CR_Common_MSIG_C4 <- rbind(MSIG_CR_Common_1$Enrich.C4, MSIG_CR_Common_2$Enrich.C4, MSIG_CR_Common_3$Enrich.C4, MSIG_CR_Common_4$Enrich.C4)
+CR_Common_MSIG_C5 <- rbind(MSIG_CR_Common_1$Enrich.C5, MSIG_CR_Common_2$Enrich.C5, MSIG_CR_Common_3$Enrich.C5, MSIG_CR_Common_4$Enrich.C5)
+CR_Common_MSIG_C6 <- rbind(MSIG_CR_Common_1$Enrich.C6, MSIG_CR_Common_2$Enrich.C6, MSIG_CR_Common_3$Enrich.C6, MSIG_CR_Common_4$Enrich.C6)
+CR_Common_MSIG_C7 <- rbind(MSIG_CR_Common_1$Enrich.C7, MSIG_CR_Common_2$Enrich.C7, MSIG_CR_Common_3$Enrich.C7, MSIG_CR_Common_4$Enrich.C7)
+CR_Common_MSIG_C8 <- rbind(MSIG_CR_Common_1$Enrich.C8, MSIG_CR_Common_2$Enrich.C8, MSIG_CR_Common_3$Enrich.C8, MSIG_CR_Common_4$Enrich.C8)
+CR_Common_MSIG_H <- rbind(MSIG_CR_Common_1$Enrich.H, MSIG_CR_Common_2$Enrich.H, MSIG_CR_Common_3$Enrich.H, MSIG_CR_Common_4$Enrich.H)
+```
+
+# Combine MSigDB and KEGG results 
+
+```{r}
+# ALL GENES ENRICHMENTS 
+# Write all sheets (conditions) to excel file 
+x <- c(list(PR_KEGG = PR_KEGG_enrichment), PR_MSIG_enrichment)
+write_xlsx(x, file.path(results_dir, "01_All_Genes", paste0(data_type,"_PR_KEGG_MSIGDB_all_genes.xlsx")))
+
+x <- c(list(CR_KEGG = CR_KEGG_enrichment), CR_MSIG_enrichment)
+write_xlsx(x, file.path(results_dir, "01_All_Genes", paste0(data_type, "_CR_KEGG_MSIGDB_all_genes.xlsx")))
+
+x <- c(list(PR_COMMON_KEGG = PR_Common_KEGG_enrichment), PR_Common_MSIG_enrichment)
+write_xlsx(x, file.path(results_dir, "01_All_Genes", paste0(data_type,"_PR_Common_KEGG_MSIGDB_all_genes.xlsx")))
+
+x <- c(list(CR_COMMON_KEGG = CR_Common_KEGG_enrichment), CR_Common_MSIG_enrichment)
+write_xlsx(x, file.path(results_dir, "01_All_Genes", paste0(data_type,"_CR_Common_KEGG_MSIGDB_all_genes.xlsx")))
+
+
+# Genes only in the highest resolution
+x <- c(list(PR_KEGG = PR_KEGG_enrichment_res4), PR_MSIG_enrichment_res4)
+write_xlsx(x, file.path(results_dir, paste0(res4, "_only"), paste0(data_type, "_PR_KEGG_MSIGDB_", res4, "_genes.xlsx")))
+
+x <- c(list(CR_KEGG = CR_KEGG_enrichment_res4), CR_MSIG_enrichment_res4)
+write_xlsx(x, file.path(results_dir, paste0(res4, "_only"), paste0(data_type,"_CR_KEGG_MSIGDB_", res4, "_genes.xlsx")))
+
+x <- c(list(PR_COMMON_KEGG = PR_Common_KEGG_enrichment_res4), PR_Common_MSIG_enrichment_res4)
+write_xlsx(x, file.path(results_dir, paste0(res4, "_only"), paste0(data_type,"_PR_COMMON_KEGG_MSIGDB_", res4, "_genes.xlsx")))
+
+x <- c(list(CR_COMMON_KEGG = CR_Common_KEGG_enrichment_res4), CR_Common_MSIG_enrichment_res4)
+write_xlsx(x, file.path(results_dir, paste0(res4, "_only"), paste0(data_type,"_CR_COMMON_KEGG_MSIGDB_", res4, "_genes.xlsx")))
+
+# Genes only in the second-highest resolution (res3)
+x <- c(list(PR_KEGG = PR_KEGG_enrichment_res3), PR_MSIG_enrichment_res3)
+write_xlsx(x, file.path(results_dir, paste0(res3, "_only"), paste0(data_type, "_PR_KEGG_MSIGDB_", res3, "_genes.xlsx")))
+
+x <- c(list(CR_KEGG = CR_KEGG_enrichment_res3), CR_MSIG_enrichment_res3)
+write_xlsx(x, file.path(results_dir, paste0(res3, "_only"), paste0(data_type,"_CR_KEGG_MSIGDB_", res3, "_genes.xlsx")))
+
+x <- c(list(PR_COMMON_KEGG = PR_Common_KEGG_enrichment_res3), PR_Common_MSIG_enrichment_res3)
+write_xlsx(x, file.path(results_dir, paste0(res3, "_only"), paste0(data_type,"_PR_COMMON_KEGG_MSIGDB_", res3, "_genes.xlsx")))
+
+x <- c(list(CR_COMMON_KEGG = CR_Common_KEGG_enrichment_res3), CR_Common_MSIG_enrichment_res3)
+write_xlsx(x, file.path(results_dir, paste0(res3, "_only"), paste0(data_type,"_CR_COMMON_KEGG_MSIGDB_", res3, "_genes.xlsx")))
+
+# Genes only in the second-lowest resolution (res2)
+x <- c(list(PR_KEGG = PR_KEGG_enrichment_res2), PR_MSIG_enrichment_res2)
+write_xlsx(x, file.path(results_dir, paste0(res2, "_only"), paste0(data_type, "_PR_KEGG_MSIGDB_", res2, "_genes.xlsx")))
+
+x <- c(list(CR_KEGG = CR_KEGG_enrichment_res2), CR_MSIG_enrichment_res2)
+write_xlsx(x, file.path(results_dir, paste0(res2, "_only"), paste0(data_type,"_CR_KEGG_MSIGDB_", res2, "_genes.xlsx")))
+
+x <- c(list(PR_COMMON_KEGG = PR_Common_KEGG_enrichment_res2), PR_Common_MSIG_enrichment_res2)
+write_xlsx(x, file.path(results_dir, paste0(res2, "_only"), paste0(data_type,"_PR_COMMON_KEGG_MSIGDB_", res2, "_genes.xlsx")))
+
+x <- c(list(CR_COMMON_KEGG = CR_Common_KEGG_enrichment_res2), CR_Common_MSIG_enrichment_res2)
+write_xlsx(x, file.path(results_dir, paste0(res2, "_only"), paste0(data_type,"_CR_COMMON_KEGG_MSIGDB_", res2, "_genes.xlsx")))
+
+# Genes only in the lowest resolution (res1)
+x <- c(list(PR_KEGG = PR_KEGG_enrichment_res1), PR_MSIG_enrichment_res1)
+write_xlsx(x, file.path(results_dir, paste0(res1, "_only"), paste0(data_type, "_PR_KEGG_MSIGDB_", res1, "_genes.xlsx")))
+
+x <- c(list(CR_KEGG = CR_KEGG_enrichment_res1), CR_MSIG_enrichment_res1)
+write_xlsx(x, file.path(results_dir, paste0(res1, "_only"), paste0(data_type,"_CR_KEGG_MSIGDB_", res1, "_genes.xlsx")))
+
+x <- c(list(PR_COMMON_KEGG = PR_Common_KEGG_enrichment_res1), PR_Common_MSIG_enrichment_res1)
+write_xlsx(x, file.path(results_dir, paste0(res1, "_only"), paste0(data_type,"_PR_COMMON_KEGG_MSIGDB_", res1, "_genes.xlsx")))
+
+x <- c(list(CR_COMMON_KEGG = CR_Common_KEGG_enrichment_res1), CR_Common_MSIG_enrichment_res1)
+write_xlsx(x, file.path(results_dir, paste0(res1, "_only"), paste0(data_type,"_CR_COMMON_KEGG_MSIGDB_", res1, "_genes.xlsx")))
+
+# RESOLUTION COUNT SEPARATED ENRICHMENTS 
+# Write all sheets (conditions) to excel file 
+x <- c(list(PR_KEGG = PR_KEGG_ALL), list(Enrich.C1 = PR_MSIG_C1), list(Enrich.C2 = PR_MSIG_C2), list(Enrich.C3 = PR_MSIG_C3), list(Enrich.C4 = PR_MSIG_C4), list(Enrich.C5 = PR_MSIG_C5), list(Enrich.C6 = PR_MSIG_C6), list(Enrich.C7 = PR_MSIG_C7), list(Enrich.C8 = PR_MSIG_C8), list(Enrich.H = PR_MSIG_H))
+write_xlsx(x, file.path(results_dir, "02_Resolution_Count_Separated", paste0(data_type, "_PR_KEGG_MSIGDB.xlsx")))
+
+x <- c(list(CR_KEGG = CR_KEGG_ALL), list(Enrich.C1 = CR_MSIG_C1), list(Enrich.C2 = CR_MSIG_C2), list(Enrich.C3 = CR_MSIG_C3), list(Enrich.C4 = CR_MSIG_C4), list(Enrich.C5 = CR_MSIG_C5), list(Enrich.C6 = CR_MSIG_C6), list(Enrich.C7 = CR_MSIG_C7), list(Enrich.C8 = CR_MSIG_C8), list(Enrich.H = CR_MSIG_H))
+write_xlsx(x, file.path(results_dir, "02_Resolution_Count_Separated", paste0(data_type, "_CR_KEGG_MSIGDB.xlsx")))
+
+x <- c(list(PR_COMMON_KEGG = PR_COMMON_KEGG_ALL),list(Enrich.C1 = PR_Common_MSIG_C1), list(Enrich.C2 = PR_Common_MSIG_C2), list(Enrich.C3 = PR_Common_MSIG_C3), list(Enrich.C4 = PR_Common_MSIG_C4), list(Enrich.C5 = PR_Common_MSIG_C5), list(Enrich.C6 = PR_Common_MSIG_C6), list(Enrich.C7 = PR_Common_MSIG_C7), list(Enrich.C8 = PR_Common_MSIG_C8), list(Enrich.H = PR_Common_MSIG_H))
+write_xlsx(x, file.path(results_dir, "02_Resolution_Count_Separated", paste0(data_type,"_PR_Common_KEGG_MSIGDB.xlsx")))
+
+x <- c(list(CR_COMMON_KEGG = CR_COMMON_KEGG_ALL),list(Enrich.C1 = CR_Common_MSIG_C1), list(Enrich.C2 = CR_Common_MSIG_C2), list(Enrich.C3 = CR_Common_MSIG_C3), list(Enrich.C4 = CR_Common_MSIG_C4), list(Enrich.C5 = CR_Common_MSIG_C5), list(Enrich.C6 = CR_Common_MSIG_C6), list(Enrich.C7 = CR_Common_MSIG_C7), list(Enrich.C8 = CR_Common_MSIG_C8), list(Enrich.H = CR_Common_MSIG_H))
+write_xlsx(x, file.path(results_dir, "02_Resolution_Count_Separated", paste0(data_type,"_CR_Common_KEGG_MSIGDB.xlsx")))
+```
+
+# Distribution of genes detected at different resolution counts for each condition 
+
+```{r}
+combined_PR_counts <- c(PR_genes_1_res_count, PR_genes_2_res_count, PR_genes_3_res_count, PR_genes_4_res_count)
+
+combined_CR_counts <- c(CR_genes_1_res_count, CR_genes_2_res_count, CR_genes_3_res_count, CR_genes_4_res_count)
+
+combined_PR_Common_counts <- c(PR_Common_genes_1_res_count, PR_Common_genes_2_res_count, PR_Common_genes_3_res_count, PR_Common_genes_4_res_count)
+
+combined_CR_Common_counts <- c(CR_Common_genes_1_res_count, CR_Common_genes_2_res_count, CR_Common_genes_3_res_count, CR_Common_genes_4_res_count)
+
+barplot(combined_PR_counts, names.arg = c("1 resolution", "2 resolutions", "3 resolutions", "4 resolutions"), col = "blue", ylab = "Number of genes", main = "Genes Overlapping PR Anchors", xlab = "Number of Resolutions the Gene was Detected in", ylim = c(0, 6000))
+
+
+barplot(combined_CR_counts, names.arg = c("1 resolution", "2 resolutions", "3 resolutions", "4 resolutions"), col = "red", ylab = "Number of genes", main = "Genes Overlapping CR Anchors", xlab = "Number of Resolutions the Gene was Detected in", ylim = c(0, 6000))
+
+barplot(combined_PR_Common_counts, names.arg = c("1 resolution", "2 resolutions", "3 resolutions", "4 resolutions"), col = "green", ylab = "Number of genes", main = "Genes Overlapping PR Common Anchors", xlab = "Number of Resolutions the Gene was Detected in", ylim = c(0, 6000))
+
+barplot(combined_CR_Common_counts, names.arg = c("1 resolution", "2 resolutions", "3 resolutions", "4 resolutions"), col = "green", ylab = "Number of genes", main = "Genes Overlapping CR Common Anchors", xlab = "Number of Resolutions the Gene was Detected in", ylim = c(0, 6000))
+```
