@@ -1,0 +1,89 @@
+---
+title: "Analysis"
+author: "Mikhail Dozmorov"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: no
+  html_document:
+    theme: cerulean
+    toc: yes
+---
+
+```{r setup, echo=FALSE, message=FALSE, warning=FALSE}
+# Set up the environment
+library(knitr)
+opts_chunk$set(cache.path='cache/', fig.path='img/', cache=F, tidy=T, fig.keep='high', echo=F, dpi=100, warnings=F, message=F, comment=NA, warning=F, results='as.is', fig.width = 10, fig.height = 6) #out.width=700, 
+library(pander)
+panderOptions('table.split.table', Inf)
+set.seed(1)
+library(dplyr)
+options(stringsAsFactors = FALSE)
+```
+
+# Libraries
+
+```{r libraries}
+library(readr)
+library(ggplot2)
+library(ggrepel)
+library(ggprism)
+```
+
+# Settings
+
+```{r settings}
+# 10kb, for one panel
+dir_data <- "/Users/mdozmorov/Documents/Data/GoogleDrive/HiC_files/results/Maggie/Mustache_results_v2/preprocessing_any/Motif_Enrichment/UniBind_results/Differential_No_Background/CR_vs_PR/Diff_10kb_CR_vs_PR"
+# dir_data <- "~/Google Drive/My Drive/HiC_files/results/Maggie/Mustache_results_v2/preprocessing_any/Motif_Enrichment/UniBind_results/Differential_No_Background/CR_vs_PR/Diff_10kb_CR_vs_PR"
+# 25kb, for another panel
+# dir_data <- "/Users/mdozmorov/Documents/Data/GoogleDrive/HiC_files/results/Maggie/Mustache_results_v2/preprocessing_any/Motif_Enrichment/UniBind_results/Differential_No_Background/CR_vs_PR/Diff_25kb_CR_vs_PR"
+# dir_data <- "~/Google Drive/My Drive/HiC_files/results/Maggie/Mustache_results_v2/preprocessing_any/Motif_Enrichment/UniBind_results/Differential_No_Background/CR_vs_PR/Diff_25kb_CR_vs_PR"
+fileNameIn1 <- file.path(dir_data, "allEnrichments.tsv")
+fileNameOut1 <- file.path(dir_data, "Unibind_enrichment_beeswarmplot.svg")
+# Min number of supporting peaks
+min_peaks <- 50
+# Top TFs
+top_TFs <- 5
+# Min number of supporting experiments
+min_exp <- 2
+```
+
+# Load data
+
+```{r data}
+mtx <- read_tsv(fileNameIn1)
+# Keep TFs supported by minimum number of peaks
+mtx <- mtx %>% dplyr::filter(support >= min_peaks)
+# Get number of experiments per TF
+mtx_summary <- mtx %>% dplyr::group_by(collection) %>% summarise(Count = n())
+# Keep only those supported by the min number of experiments
+mtx_summary <- mtx_summary %>% filter(Count >= min_exp)
+# Select top remaining
+selected_TFs <- unique(mtx$collection[mtx$collection %in% mtx_summary$collection])[1:top_TFs]
+mtx <- mtx %>% dplyr::filter(mtx$collection %in% selected_TFs)
+mtx$collection <- factor(mtx$collection, levels = selected_TFs)
+# Keep cell type name only for the top significant experiments per TF
+for (TF in selected_TFs[1:4]) {
+  mtx$cellType[mtx$collection == TF][2:length(mtx$cellType[mtx$collection == TF])] <- NA
+}
+# For fifth TF, remove cell names alltogether
+mtx$cellType[mtx$collection == selected_TFs[5]] <- NA
+```
+
+```{r}
+# Actual plotting
+ggplot(mtx, aes(x = collection, y = pValueLog, fill = collection)) +
+  geom_point(size = 3, colour = "black", pch=21, position = position_jitter(width = 0.1)) +
+  geom_label_repel(aes(label = cellType), force=1, box.padding=0.5, label.padding = 0.1, direction = c("x"), segment.color = 'grey50', max.overlaps = 3, nudge_x = 0.2, nudge_y = 0.2, seed = 3 ) +
+  theme_classic() +
+  theme(legend.position = "none") +
+  theme(text = element_text(size = 15),
+        axis.text = element_text(size = 15)) +
+  xlab(paste0("Top ", top_TFs, " enriched TFs")) +
+  ylab("-log10(P-value)")
+  # scale_fill_prism()
+ggsave(fileNameOut1, width = 6, height = 4)
+```
+
+

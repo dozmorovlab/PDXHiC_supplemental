@@ -1,0 +1,197 @@
+---
+title: "GSEA barplot figure"
+author: "Maggie Marshall"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: no
+  html_document:
+    theme: cerulean
+    toc: yes
+---
+```{r setup, echo=FALSE, message=FALSE, warning=FALSE}
+# Set up the environment
+library(knitr)
+opts_chunk$set(cache.path='cache/', fig.path='img/', cache=F, tidy=T, fig.keep='high', echo=F, dpi=100, warnings=F, message=F, comment=NA, warning=F, results='as.is', fig.width = 10, fig.height = 6) #out.width=700, 
+library(pander)
+panderOptions('table.split.table', Inf)
+set.seed(1)
+library(dplyr)
+options(stringsAsFactors = FALSE)
+```
+
+This script will take in the results from running GSEA enrichments on RNAseq and dcHiC AB compartments data and turn it into a bar plot for each subplot in the GSEA figures for each dataset. Each bar will correspond to a pathway enriched, and will represent the -log10(p.adj). 
+
+```{r libraries}
+# Libraries
+library(tidyverse)
+library(readxl)
+library(cowplot)
+library(ggplot2)
+library(stringr)
+library("ggsci")
+library(scales)
+scales::show_col(pal_lancet("lanonc")(8))
+mycols = pal_lancet("lanonc")(8)
+library(forcats)
+```
+
+# Settings
+
+```{r settings}
+# Data
+# Working directory
+# Mikhail's paths
+# data_dir       <- "/Users/mdozmorov/Documents/Data/GoogleDrive/HiC_files/results/manuscript"
+# Maggie's paths
+data_dir       <- "~/Google Drive/My Drive/HiC_files/results/manuscript"
+
+# data type parameter, either RNAseq or dcHiC to set the data directory and file paths 
+# data_type = "RNAseq"
+data_type = "dcHiC"
+# set file paths depending on data type
+if (data_type == "RNAseq"){
+  fileNameIn1 <- file.path(data_dir, "Tables_DEGs_Enrichment", "Tables_DEGs_Enrichment.xlsx")
+  OutputDir <- file.path(data_dir, "Tables_DEGs_Enrichment")
+  Output_Suffix <- "_Figure_DEGs_Enrichment.svg"
+  # parameter for subplots 
+  subplots = 3
+  # set sheets for A panel 
+  # (A) KEGG pathways, C5: ontology gene sets, (B) C2: curated gene sets, (C) H: hallmark gene sets MSigDb results.
+  A_terms <- c("Ribosome", "Oxidative phosphorylation", "GOMF_STRUCTURAL_CONSTITUENT_OF_RIBOSOME", "GOBP_DEFENSE_RESPONSE")
+  A_sheets <- c("GSEA.KEGG", "GSEA.C5")
+  # set sheets for B panel 
+  B_sheets <- c("GSEA.C2")
+  B_terms <- c("SANA_RESPONSE_TO_IFNG_UP", "ONDER_CDH1_TARGETS_2_DN", "SANA_TNF_SIGNALING_UP",
+               "JAEGER_METASTASIS_DN")
+  # set sheets for C panel 
+  C_sheets <- c("GSEA.H")
+  C_terms <- c("HALLMARK_INTERFERON_GAMMA_RESPONSE", "HALLMARK_INTERFERON_ALPHA_RESPONSE",
+               "HALLMARK_WNT_BETA_CATENIN_SIGNALING", "HALLMARK_OXIDATIVE_PHOSPHORYLATION", 
+               "HALLMARK_DNA_REPAIR", "HALLMARK_NOTCH_SIGNALING", "HALLMARK_KRAS_SIGNALING_UP",
+               "HALLMARK_MTORC1_SIGNALING")
+  # combined list of list for sheet names for each subplot 
+  sheets = c(A = list(A_sheets), B = list(B_sheets), C = list(C_sheets))
+  # list of list for term names for each subplot 
+  terms = c(A = list(A_terms), B = list(B_terms), C = list(C_terms))
+} else if (data_type == "dcHiC"){
+  fileNameIn1 <- file.path(data_dir, "Tables_dcHiC_AB_Enrichment", "Tables_dcHiC_AB_Enrichment.xlsx")
+  OutputDir <- file.path(data_dir, "Tables_dcHiC_AB_Enrichment")
+  Output_Suffix <- "_Figure_dcHiC_AB_Enrichment.svg"
+  # parameter for subplots 
+  subplots = 4
+  # set sheets for A panel 
+  # (A) KEGG pathways. (B) C2: curated gene sets, (C) C5: ontology gene sets, (D) H: hallmark gene sets MSigDb results
+  A_sheets <- c("GSEA.KEGG.ALL")
+  A_terms <- c("Tyrosine metabolism", "Metabolism of xenobiotics by cytochrome P450",
+               "Basal cell carcinoma", "Ribosome biogenesis in eukaryotes")
+  # set sheets for B panel 
+  B_sheets <- c("GSEA.ALL.C2")
+  B_terms <- c("NIKOLSKY_BREAST_CANCER_16P13_AMPLICON", "REACTOME_ETHANOL_OXIDATION",
+               "LASTOWSKA_COAMPLIFIED_WITH_MYCN",
+               "REACTOME_TRANSCRIPTIONAL_REGULATION_BY_SMALL_RNAS")
+  # set sheets for C panel 
+  C_sheets <- c("GSEA.ALL.C5")
+  C_terms <- c("GOBP_HOMOPHILIC_CELL_ADHESION_VIA_PLASMA_MEMBRANE_ADHESION_MOLECULES",
+               "GOBP_ETHANOL_OXIDATION")
+  # set sheets for D panel 
+  D_sheets <- c("GSEA.ALL.H")
+  D_terms <- c("HALLMARK_INTERFERON_GAMMA_RESPONSE", "HALLMARK_P53_PATHWAY")
+  # combined list of list for sheet names for each subplot 
+  sheets = c(A = list(A_sheets), B = list(B_sheets), C = list(C_sheets), D = list(D_sheets))
+  # list of list for term names for each subplot 
+  terms = c(A = list(A_terms), B = list(B_terms), C = list(C_terms), D = list(D_terms))
+}
+
+max_enrichment_length <- 50 # Maximum length of enrichment descriptions
+```
+
+# Visualization
+
+-log10 adjusted p-value interpretation
+
+$$1 = 10^{-1} = 0.1$$
+$$1.3 = 10^{-1.3} \approx 0.05$$
+$$2 = 10^{-2} = 0.01$$
+$$4 = 10^{-4} = 0.0001$$
+etc. -log10 adjusted p-value $\ge1$ is acceptable
+
+```{r visualizations, fig.height=4}
+# iterate through the length of the number of subplots 
+for (i in 1:subplots){
+  # initialize the mtx dataframe as an empty df 
+  mtx = data.frame(matrix(ncol = 2, nrow = 0))
+  # iterate through the length of the number of sheets in the current subplot 
+  for (x in 1:length(sheets[[i]])){
+    current_sheet = sheets[[i]][x]
+    mtx1 = read_xlsx(fileNameIn1, sheet = current_sheet)
+    # if the current sheet is KEGG enrichment, we want to match the ID column to the description column  
+    if (grepl("KEGG", current_sheet)){
+      mtx1 = mtx1 %>% 
+        dplyr::mutate(ID = Description)
+    }
+    # filter only the terms that are present in the current list of terms 
+     mtx1 = mtx1 %>% 
+      dplyr::filter(ID %in% terms[[i]]) %>% 
+      dplyr::mutate(log10padj = ifelse(NES < 0, 
+                                       -log10(as.numeric(p.adjust)) * (-1),
+                                       # create log10 padj column depending on sign of NES 
+                                       -log10(as.numeric(p.adjust)))) %>%
+      dplyr::select(ID, log10padj)
+    # append mtx1 to mtx
+     mtx = rbind(mtx, mtx1)
+  }
+  # Add sign variable indicating whether log10padj is negative or positive
+  mtx[["sign"]] = ifelse(mtx[["log10padj"]] >= 0, "positive", "negative")
+  # replace names w/shorter ones 
+  mtx$ID <- gsub("GOBP_HOMOPHILIC_CELL_ADHESION_VIA_PLASMA_MEMBRANE_ADHESION_MOLECULES",
+                         "GOBP_CELL_ADHESION", mtx$ID)
+  # replace "GOMF_STRUCTURAL_CONSITUENT_OF_RIBOSOME" with "GOMF_RIBOSOME"
+  mtx$ID <- gsub("GOMF_STRUCTURAL_CONSTITUENT_OF_RIBOSOME", "GOMF_RIBOSOME",
+                         mtx$ID)
+  # change Ribosome to KEGG_RIBOSOME
+  mtx$ID <- gsub("Ribosome", "KEGG_RIBOSOME",
+                         mtx$ID)
+  # KEGG_BASAL_CELL_CARCINOMA, 
+  mtx$ID <- gsub("Basal cell carcinoma", "KEGG_BASAL_CELL_CARCINOMA",
+                         mtx$ID)
+  
+  # KEGG_RIBOSOME
+  mtx$ID <- gsub("KEGG_RIBOSOME biogenesis in eukaryotes", "KEGG_RIBOSOME",
+                         mtx$ID)
+  # KEGG_METABOLISM_BY_XENOBIOTICS, 
+  mtx$ID <- gsub("Metabolism of xenobiotics by cytochrome P450", "KEGG_METABOLISM_BY_XENOBIOTICS",
+                         mtx$ID)
+  #KEGG_TYROSINE_METABOLISM
+  mtx$ID <- gsub("Tyrosine metabolism", "KEGG_TYROSINE_METABOLISM",
+                         mtx$ID)
+  # Change Oxidative phosphorylation to KEGG_OXPHOS
+  mtx$ID <- gsub("Oxidative phosphorylation", "KEGG_OXPHOS", mtx$ID)
+  # Adjust what name to plot
+  mtx$enrichment <- str_trunc(mtx$ID, width = max_enrichment_length)
+  # plot
+  panel_plot = ggplot(data = mtx, aes(x = reorder(enrichment, log10padj), y = log10padj)) +
+    # geom_col(aes(fill = log10padj)) +
+    geom_col(aes(fill = sign), width = 0.7) +
+    # scale_fill_gradient2(low = "blue", high = "red", midpoint = 0) +
+    scale_fill_manual(name = "Direction",
+                      values = c("positive" = mycols[2], "negative" = mycols[1]), 
+                      labels = c("Duplicated", "Deleted")) +
+    coord_flip() +
+    theme_cowplot() +
+    ylab("-log10 adjusted p-value") +
+    xlab("Enrichment term") +
+    theme(text = element_text(size = 25),
+          axis.text = element_text(size = 20),
+          legend.position = c(0.05, 0.85),
+          legend.background = element_rect(fill="white", 
+                                    size=0.5, linetype="solid"))
+  # save plot
+  fileNameOut = file.path(OutputDir, paste0(names(sheets[i]), Output_Suffix))
+  ggsave(filename = fileNameOut, plot = panel_plot, width = 10, height = 4)
+}
+
+```
+
+
+

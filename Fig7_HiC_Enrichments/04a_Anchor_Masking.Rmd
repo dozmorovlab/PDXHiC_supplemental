@@ -1,0 +1,273 @@
+---
+title: "Anchor Masking"
+author: "Maggie Marshall"
+date: "`r Sys.Date()`"
+always_allow_html: true
+output:
+  html_document:
+    theme: cerulean
+    toc: yes
+  pdf_document:
+    toc: no
+---
+
+```{r setup, echo=FALSE, message=FALSE, warning=FALSE}
+# Set up the environment
+library(knitr)
+opts_chunk$set(cache.path = "cache/", fig.path = "img/", cache = F, tidy = T, fig.keep = "high", echo = F, dpi = 100, warnings = F, message = F, comment = NA, warning = F, results = "as.is", fig.width = 10, fig.height = 6, cache.lazy = FALSE) # out.width=700,
+library(pander)
+panderOptions("table.split.table", Inf)
+set.seed(1)
+library(dplyr)
+options(stringsAsFactors = FALSE)
+```
+
+- Input: PR/CR/Common Anchors from `~/Google Drive/My Drive/HiC_files/results/datatype/preprocessing_any` where data type can be Mustache, HiCcompare, Neoloops, and SpectralTAD anchors 
+- Output: `~/Google Drive/My Drive/HiC_files/results/Maggie/datatype/Motif_Enrichment/Masked_Anchors`
+where data type can be Mustache, HiCcompare, Neoloops, and SpectralTAD
+Bed files containing anchors "masked" with open chromatin regions using activeranges (`https://github.com/mdozmorov/activeranges`). Will be used to perform Motif enrichment using MEME & HOMER ChIP-seq. 
+
+# Libraries
+
+```{r libraries}
+library(activeranges)
+library(excluderanges)
+library(GenomicRanges)
+library(knitr)
+library(rtracklayer)
+```
+
+# Settings
+
+```{r}
+# Maggie's paths 
+# Maggie's home directory
+home_dir = '~/Google Drive/My Drive'
+# home_dir <- "/Users/mdozmorov/Documents/Data/GoogleDrive"
+
+# data type parameter 
+mustache <- FALSE 
+mustache_v2 <- FALSE 
+hiccompare <- FALSE
+hiccompare_v1 <- FALSE
+hiccompare_v2 <- FALSE
+spectralTAD <- FALSE
+spectralTAD_v2 <- FALSE
+neoloop <- FALSE
+neoloop_v2 <- TRUE
+hicFindTADs <- FALSE
+hicFindTADs_v2 <- FALSE
+
+# preprocessing type
+preprocessing = 'any'
+
+# resolution string  
+# Make it 50kb, 100kb, 200kb , 500kb for SpectralTAD window sizes 
+resolution_string <- "10kb"
+
+
+if (mustache) {
+    dir_data <- file.path(home_dir, "HiC_files/results/mustache_results", paste0('preprocessing_',preprocessing))
+    dir_results <-  file.path(home_dir, "HiC_files/results/Maggie/Mustache_results", paste0('preprocessing_',preprocessing), 'Motif_Enrichment/Masked_Anchors')
+    analysis_type <- "Mustache"
+  
+} else if (mustache_v2) {
+    dir_data <- file.path(home_dir, "HiC_files/results/mustache_results_v2", paste0('preprocessing_',preprocessing))
+    dir_results <-  file.path(home_dir, "HiC_files/results/Maggie/Mustache_results_v2", paste0('preprocessing_',preprocessing), 'Motif_Enrichment/Masked_Anchors')
+    analysis_type <- "Mustache_v2"
+} else if (hiccompare) {
+  dir_data <- file.path(home_dir, "HiC_files/results/HiCcompare_results", paste0('preprocessing_',preprocessing))
+    dir_results <-  file.path(home_dir, "HiC_files/results/Maggie/HiCcompare_results", paste0('preprocessing_',preprocessing), 'Motif_Enrichment/Masked_Anchors')
+    analysis_type <- "HiCcompare"
+} else if (hiccompare_v1) {
+  dir_data <- file.path(home_dir, "HiC_files/results/HiCcompare_results_v1", paste0('preprocessing_',preprocessing))
+    dir_results <-  file.path(home_dir, "HiC_files/results/Maggie/HiCcompare_results_v1", paste0('preprocessing_',preprocessing), 'Motif_Enrichment/Masked_Anchors')
+    analysis_type <- "HiCcompare_v1"
+} else if (hiccompare_v2) {
+  dir_data <- file.path(home_dir, "HiC_files/results/HiCcompare_results_v2", paste0('preprocessing_',preprocessing))
+    dir_results <-  file.path(home_dir, "HiC_files/results/Maggie/HiCcompare_results_v2", paste0('preprocessing_',preprocessing), 'Motif_Enrichment/Masked_Anchors')
+    analysis_type <- "HiCcompare_v2"
+} else if (spectralTAD) {
+  dir_data <- file.path(home_dir, "HiC_files/results/TAD_Boundaries/SpectralTAD", paste0('preprocessing_',preprocessing))
+    dir_results <-  file.path(home_dir, "HiC_files/results/Maggie/TAD_Boundaries_Analysis/SpectralTAD_results", paste0('preprocessing_',preprocessing), 'Motif_Enrichment/Masked_Anchors')
+    analysis_type <- "SpectralTAD"
+} else if (spectralTAD_v2) {
+  dir_data <- file.path(home_dir, "HiC_files/results/TAD_Boundaries/SpectralTAD_v2", paste0('preprocessing_',preprocessing))
+    dir_results <-  file.path(home_dir, "HiC_files/results/Maggie/TAD_Boundaries_Analysis/SpectralTAD_results_v2", paste0('preprocessing_',preprocessing), 'Motif_Enrichment/Masked_Anchors')
+    analysis_type <- "SpectralTAD_v2"
+} else if (neoloop) {
+  resolution_string <- "10kb" # can keep for now, only have 10kb anchors
+  dir_data <- file.path(home_dir, "HiC_files/results/neoloopfinder_results", paste0('preprocessing_',preprocessing))
+    dir_results <-  file.path(home_dir, "HiC_files/results/Maggie/Neoloop_results", paste0('preprocessing_',preprocessing), 'Motif_Enrichment/Masked_Anchors')
+    analysis_type <- "Neoloop"
+} else if (neoloop_v2) {
+  resolution_string <- "10kb" # can keep for now, only have 10kb anchors
+  dir_data <- file.path(home_dir, "HiC_files/results/neoloopfinder_results_v2", paste0('preprocessing_',preprocessing))
+    dir_results <-  file.path(home_dir, "HiC_files/results/Maggie/Neoloop_results_v2", paste0('preprocessing_',preprocessing), 'Motif_Enrichment/Masked_Anchors')
+    analysis_type <- "Neoloop_v2"
+} else if (hicFindTADs){
+  dir_data <- file.path(home_dir, "HiC_files/results/TAD_Boundaries/hicFindTADs", paste0('preprocessing_',preprocessing))
+    dir_results <-  file.path(home_dir, "HiC_files/results/Maggie/TAD_Boundaries_Analysis/hicFindTADs_results", paste0('preprocessing_',preprocessing), 'Motif_Enrichment/Masked_Anchors')
+    analysis_type <- "hicFindTADs"
+}else if (hicFindTADs_v2){
+  dir_data <- file.path(home_dir, "HiC_files/results/TAD_Boundaries/hicFindTADs_v2", paste0('preprocessing_',preprocessing))
+    dir_results <-  file.path(home_dir, "HiC_files/results/Maggie/TAD_Boundaries_Analysis/hicFindTADs_results_v2", paste0('preprocessing_',preprocessing), 'Motif_Enrichment/Masked_Anchors')
+    analysis_type <- "hicFindTADs_v2"
+}
+
+# set input files 
+PR_file <- file.path(dir_data, paste0("anchors_PR_unique_", resolution_string, ".bed"))
+CR_file <- file.path(dir_data, paste0("anchors_CR_unique_", resolution_string, ".bed"))
+PR_Common_file <- file.path(dir_data, paste0("anchors_PR_common_", resolution_string, ".bed"))
+CR_Common_file <- file.path(dir_data, paste0("anchors_CR_common_", resolution_string, ".bed"))
+# set output files 
+PR_output <- file.path(dir_results, paste0("masked_PR_anchors_", resolution_string,".bed"))
+CR_output <- file.path(dir_results, paste0("masked_CR_anchors_", resolution_string,".bed"))
+PR_Common_output <- file.path(dir_results, paste0("masked_PR_Common_anchors_", resolution_string,".bed"))
+CR_Common_output <- file.path(dir_results, paste0("masked_CR_Common_anchors_", resolution_string,".bed"))
+```
+
+# Load in hg38 activeranges coordinates
+```{r}
+# hg38 activeranges coordinates
+download.file(url = "https://drive.google.com/uc?export=download&id=1CdaSUr45IbmDicegz0TPITcOO41e2MaT", destfile = "misc/hg38.Meuleman.Cancer_epithelial.rds")
+ActiveGR.hg38.Cancer <- readRDS(file = "misc/hg38.Meuleman.Cancer_epithelial.rds")
+ActiveGR.hg38.Cancer
+```
+
+# Load in hg38 excluderanges
+
+```{r}
+# hg38 centromere 
+suppressPackageStartupMessages(library(rCGH))
+suppressPackageStartupMessages(library(GenomicRanges))
+# hg38 # data.frame
+# Adjust chromosome names
+hg38$chrom[hg38$chrom == 23] <- "X"
+hg38$chrom[hg38$chrom == 24] <- "Y"
+hg38$chrom <- paste0("chr", hg38$chrom)
+# Make GRanges object
+hg38.UCSC.centromere <- makeGRangesFromDataFrame(hg38, seqnames.field = "chrom", start.field = "centromerStart", end.field = "centromerEnd")
+# Assign seqinfo data
+seqlengths(hg38.UCSC.centromere) <- hg38$length
+genome(hg38.UCSC.centromere)     <- "hg38"
+# Resulting object
+hg38.UCSC.centromere
+
+# hg38 telomere 
+download.file(url = "https://drive.google.com/uc?id=1Hn8D81TlBbbdbSVfIJTxWxUpFKxzyM0L&export=download", destfile = "misc/hg38.UCSC.telomere.rds")
+hg38.UCSC.telomere <- readRDS(file = "misc/hg38.UCSC.telomere.rds")
+hg38.UCSC.telomere
+```
+
+# Files 
+
+Read in anchor files into tables 
+
+```{r files}
+PR = read.table(PR_file, header = FALSE, sep="\t",stringsAsFactors=FALSE, quote="", skip = 1)
+CR = read.table(CR_file, header = FALSE, sep="\t",stringsAsFactors=FALSE, quote="", skip = 1)
+PR_Common = read.table(PR_Common_file, header = FALSE, sep="\t",stringsAsFactors=FALSE, quote="", skip = 1)
+CR_Common = read.table(CR_Common_file, header = FALSE, sep="\t",stringsAsFactors=FALSE, quote="", skip = 1)
+```
+
+# Build GRanges
+
+```{r granges}
+GR_PR <- GRanges(seqnames=PR$V1, 
+                      ranges= IRanges(start=PR$V2, end=PR$V3)) 
+GR_CR <- GRanges(seqnames=CR$V1, 
+                      ranges= IRanges(start=CR$V2, end=CR$V3))
+GR_PR_Common <- GRanges(seqnames=PR_Common$V1, 
+                      ranges= IRanges(start=PR_Common$V2, end=PR_Common$V3)) 
+GR_CR_Common <- GRanges(seqnames=CR_Common$V1, 
+                      ranges= IRanges(start=CR_Common$V2, end=CR_Common$V3)) 
+```
+
+# Number of anchors that intersect with ATAC-seq & Exclude Regions
+
+Use subsetByOverlaps because it will select only certain ranges from the GRanges that overlap with the ATAC-seq & Exclude regions 
+
+```{r activeexclude}
+# Make empty dataframe to show the number of total anchors, the anchors overlapping ATAC-seq, overlapping Centromeres, and overlapping telomeres 
+#create data frame with 0 rows and 4 columns
+df <- data.frame(matrix(ncol = 4, nrow = 0))
+
+print(resolution_string)
+print(analysis_type)
+
+print("Number of PR Anchors")
+PR_length <- length(GR_PR)
+print("Number of PR anchors overlapping ATC-seq Regions")
+PR_atac <- length(subsetByOverlaps(GR_PR, ActiveGR.hg38.Cancer))
+print("Number of PR anchors overlapping Centromeres")
+PR_centro <- length(subsetByOverlaps(GR_PR, hg38.UCSC.centromere))
+print("Number of PR anchors overlapping Telomeres")
+PR_telo <- length(subsetByOverlaps(GR_PR, hg38.UCSC.telomere))
+ df <- rbind(df, c(PR_length, PR_atac, PR_centro, PR_telo))
+
+print("Number of CR Anchors")
+CR_length <- length(GR_CR)
+print("Number of CR anchors overlapping ATC-seq Regions")
+CR_atac <- length(subsetByOverlaps(GR_CR, ActiveGR.hg38.Cancer))
+print("Number of CR anchors overlapping Centromeres")
+CR_centro <- length(subsetByOverlaps(GR_CR, hg38.UCSC.centromere))
+print("Number of CR anchors overlapping Telomeres")
+CR_telo <- length(subsetByOverlaps(GR_CR, hg38.UCSC.telomere))
+df <- rbind(df, c(CR_length, CR_atac, CR_centro, CR_telo))
+
+print("Number of PR Common Anchors")
+PR_Common_length <- length(GR_PR_Common)
+print("Number of PR Common anchors overlapping ATC-seq Regions")
+PR_Common_atac <- length(subsetByOverlaps(GR_PR_Common, ActiveGR.hg38.Cancer))
+print("Number of PR Common anchors overlapping Centromeres")
+PR_Common_centro <- length(subsetByOverlaps(GR_PR_Common, hg38.UCSC.centromere))
+print("Number of PR Common anchors overlapping Telomeres")
+PR_Common_telo <- length(subsetByOverlaps(GR_PR_Common, hg38.UCSC.telomere))
+df <- rbind(df, c(PR_Common_length, PR_Common_atac, PR_Common_centro, PR_Common_telo)) 
+
+
+print("Number of CR Common Anchors")
+CR_Common_length <- length(GR_CR_Common)
+print("Number of CR Common anchors overlapping ATC-seq Regions")
+CR_Common_atac <- length(subsetByOverlaps(GR_CR_Common, ActiveGR.hg38.Cancer))
+print("Number of CR Common anchors overlapping Centromeres")
+CR_Common_centro <- length(subsetByOverlaps(GR_CR_Common, hg38.UCSC.centromere))
+print("Number of CR Common anchors overlapping Telomeres")
+CR_Common_telo <- length(subsetByOverlaps(GR_CR_Common, hg38.UCSC.telomere))
+df <- rbind(df, c(CR_Common_length, CR_Common_atac, CR_Common_centro, CR_Common_telo)) 
+colnames(df) <- c('Total', 'Overlapping_ATAC_Seq', 'Overlapping_Centromeres', 'Overlapping_Telomeres')
+
+
+
+knitr::kable(df)
+```
+
+# Reduce Anchors
+
+```{r reduce}
+GR_PR <- GR_PR %>% GenomicRanges::reduce()
+GR_CR <- GR_CR %>% GenomicRanges::reduce()
+GR_PR_Common <- GR_PR_Common %>% GenomicRanges::reduce()
+GR_CR_Common <- GR_CR_Common %>% GenomicRanges::reduce()
+```
+
+# Intersect with hg38.Meuleman.Cancer_epithelial.rds
+
+This will allow for only the open-chromatin regions to be saved from the anchors. 
+
+```{r intersect}
+masked_PR <- intersect(GR_PR, ActiveGR.hg38.Cancer)
+masked_CR <- intersect(GR_CR, ActiveGR.hg38.Cancer)
+masked_PR_Common <- intersect(GR_PR_Common, ActiveGR.hg38.Cancer)
+masked_CR_Common <- intersect(GR_CR_Common, ActiveGR.hg38.Cancer)
+```
+
+# Save Masked Bed Files
+
+```{r export}
+export.bed(masked_PR, PR_output)
+export.bed(masked_CR, CR_output)
+export.bed(masked_PR_Common, PR_Common_output)
+export.bed(masked_CR_Common, CR_Common_output)
+```

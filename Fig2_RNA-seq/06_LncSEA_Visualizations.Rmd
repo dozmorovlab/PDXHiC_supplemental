@@ -1,0 +1,184 @@
+---
+title: "LncSEA Visualizations"
+author: "Maggie Marshall"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    theme: cerulean
+    toc: yes
+  pdf_document:
+    toc: no
+---
+```{r setup, echo=FALSE, message=FALSE, warning=FALSE}
+# Set up the environment
+library(knitr)
+opts_chunk$set(cache.path = "cache/", fig.path = "img/", cache = F, tidy = T, fig.keep = "high", echo = F, dpi = 100, warnings = F, message = F, comment = NA, warning = F, results = "as.is", fig.width = 5, fig.height = 3, cache.lazy = FALSE) # out.width=700,
+library(pander)
+panderOptions("table.split.table", Inf)
+set.seed(1)
+library(dplyr)
+options(stringsAsFactors = FALSE)
+options(scipen=10000)
+```
+
+This script will reformat the output from running [LncSEA](http://bio.liclab.net/LncSEA/index.php) on RNA-seq results to produce bar plots for each LncSEA category selected (Cancer Hallmark (slide 7 right side), Cancer Phenotype (slide 5), Enhancer (slide 6), EQTL (slide 9), RNA binding Protein (slide 8), and Subcellular Location (slide 7 left side)). Also will combine the txt files into an excel file where each category is a sheet in the order listed in the manuscript. 
+
+- Input: 
+  - The txt files outputted by LncSEA for the selected categories stored in `HiC_files/results/RNA-seq/2021.11.19_UCD52_DEG/results/lncSEA`
+  
+- Output:
+  - Combined publication figure with each category having its own subplot stored in `HiC_files/results/RNA-seq/2021.11.19_UCD52_DEG/results/lncSEA`
+
+# Libraries 
+
+```{r libraries}
+library(tidyverse)
+library(ggplot2)
+library(patchwork)
+library(writexl)
+library(scales)
+# library(RColorBrewer)
+# get continuous gradient using RColorBrewer palette 
+# mypalette = brewer.pal(9, "OrRd")
+# mypalette = c("#BA4A00", "#DC7633", "#F5B041", "#FAE42B","#F7DC6F", "#F9E79F")
+
+#mypalette = c("#BA4A00", "#DC7633", "#F5B041", "#FCCE00","#F7DC6F", "#F7ECBE")
+mypalette = c("#922B21", "#BA4A00", "#DC7633", "#F5B041","#F7DC6F", "#F9E79F")
+```
+
+# Settings 
+
+```{r settings}
+# Maggie's home directory 
+home_dir = '~/Google Drive/My Drive'
+
+# Data directory, also output directory 
+# data_dir = file.path(home_dir, "HiC_files/results/RNA-seq/2021.11.19_UCD52_DEG/results/lncSEA") # old results 
+data_dir = file.path(home_dir, "HiC_files/results/RNA-seq/2021.11.19_UCD52_DEG/results/04.06.22_lncSEA/upregulated_lncRNA")
+
+# parameter for the # of top hits, starting with 6 
+top_hits = 6
+# parameter for cancer phenotype being sorted by gene count instead of p value 
+cpheno_gene_count = TRUE
+
+# Input Files, create list containing all categories corresponding to each txt file 
+categories = c("Cancer_Hallmark", "Cancer_Phenotype", "EQTL", "Enhancer", "RNA_Binding_Protein", "Subcellular_Location")
+
+# Output Files  
+# plot output 
+plot_output = file.path(data_dir, "LncSEA_combined_figure.svg")
+# excel output 
+table_output = file.path(data_dir, "LncSEA_combined_table.xlsx")
+```
+
+# Iterate through each category and add it onto the plot and list of dataframes 
+
+```{r cat_it}
+# set up an empty list to hold the plots generated 
+plot_List = list()
+
+# set up an empty list to hold all dataframes 
+categories_dfList = list()
+
+# iterate through each category in the categories list defined above and read in the txt file, generate a bar plot, and add the dataframe to the list of dataframes 
+for (cat in categories){
+  # read in the text file for the specific category 
+  cat_df = read.table(file.path(data_dir, paste0(cat, ".txt")), header = TRUE)
+  categories_dfList[[cat]] <- cat_df  ## add new data frame to list of dataframes
+  # extract only the three columns needed, Set, Sub_class, P.Value, and Count
+  cat_df = cat_df %>% 
+    dplyr::select(c(Set, Sub_Class, P.value, Count)) %>% 
+    # transform the P.Value variable to -log10
+    mutate(logP.value = -log10(P.value),
+           Set = str_replace(Set, "VS", "VS ")) # add a space after VS in the set, will recognize the second part as another word which will be helpful for wrapping the axis labels 
+  # if the category is EQTL then we have to get rid of the duplicate rows with different Sub_Class values, we want to only keep the Common_Cis subclass values  
+  # if (cat == "EQTL"){
+  #   cat_df = cat_df %>% 
+  #     dplyr::filter(Sub_Class == "Common_Cis")
+  # }else if (cat == "Subcellular_Location"){
+  #   # we want to keep only the RNALocate subclass 
+  #   cat_df = cat_df %>% 
+  #     dplyr::filter(Sub_Class == "RNALocate")
+  # }
+  # if the cpheno_gene_count parameter is true, sort the Cancer Phenotype category by count 
+  if (cat == "Cancer_Phenotype"){
+    if (cpheno_gene_count){
+      # sort the dataframe in descending order by Count 
+      cat_df_sorted = cat_df %>% 
+    dplyr::arrange(desc(Count)) %>% 
+    # take only the top x number defined as a parameter above  
+    head(top_hits) %>% 
+    # mutate Set variable to a factor 
+    mutate(Set = factor(Set)) %>% 
+    # make the Set factors unique for duplicate Sets
+    within(.,Set<- ave(as.character(Set),FUN=make.unique)) %>% 
+    mutate(Set = fct_reorder(Set, Count, .desc = FALSE))
+    # create a plot 
+    plot = cat_df_sorted %>% 
+      ggplot(aes(x = Set, y = Count)) +
+      geom_bar(stat = "Identity", width = 0.8, fill = mypalette)  + # manually sets the colors 
+      coord_flip() +
+      ylab("Counts") +
+      xlab("") +
+      theme_bw(base_size = 12) + 
+      theme(panel.grid.major = element_blank(), 
+          panel.grid.minor = element_blank()) 
+    }
+  } else {
+  
+  # now sort the dataframe in descending order by logP.value 
+  cat_df_sorted = cat_df %>% 
+    dplyr::arrange(desc(logP.value)) %>% 
+    # take only the top x number defined as a parameter above  
+    head(top_hits) %>% 
+  # mutate Set variable to a factor 
+  mutate(Set = factor(Set)) %>% 
+    # make the Set factors unique for duplicate Sets
+  within(.,Set<- ave(as.character(Set),FUN=make.unique)) %>% 
+  mutate(Set = fct_reorder(Set, logP.value, .desc = FALSE))
+  # create a plot 
+  plot = cat_df_sorted %>% 
+    ggplot(aes(x = Set, y = logP.value)) +
+    geom_bar(stat = "Identity", width = 0.8, fill = mypalette)  + # manually sets the colors 
+    coord_flip() +
+    #scale_fill_gradientn(colors = rev(mypalette), breaks = cat_df_sorted$logP.value, rescale = FALSE, values = cat_df_sorted$logP.value ) +
+    #scale_fill_gradient2(low = "lightgoldenrod2", mid = "darkorange3", high = "firebrick4",
+                        #midpoint = median(cat_df_sorted$logP.value) + 3) +
+    #scale_fill_scico(palette = "lajolla") +
+    #scale_fill_continuous() +
+    ylab("P-value (-log10)") +
+    xlab("") +
+    theme_bw(base_size = 12) + 
+    theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank()) 
+  }
+  # if the category is Cancer_Phenotype then wrap the x-axis labels because they are very long 
+  # and add bigger margins to avoid crowding 
+  if (cat == "Cancer_Phenotype"){
+    plot = plot +
+      scale_x_discrete(labels = function(x) str_wrap(x, width = 2)) + # make it so the width is not so large, it wraps the text
+      theme(axis.text.y = element_text(margin = margin(t = 30, b = 30), vjust = 1))
+  }
+  # add the plot to the list of plots 
+  plot_List[[cat]] = plot
+}
+```
+
+# Combine the plots in the list of plots & export plot
+
+```{r plot_combo}
+combined_plot = wrap_plots(plot_List, nrow = 3, ncol = 2)
+
+ggsave(plot = combined_plot, filename = plot_output, width = 15, height = 7)
+
+# [2:length(plot_List)]
+```
+
+# Export the combined excel spreadsheet
+
+```{r exportxlsx}
+write_xlsx(x = categories_dfList, path = table_output)
+```
+
+
+

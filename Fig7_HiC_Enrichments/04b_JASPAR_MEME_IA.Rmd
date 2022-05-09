@@ -1,0 +1,614 @@
+---
+title: "MEME Integrative Analysis"
+author: "Maggie Marshall"
+date: "`r Sys.Date()`"
+always_allow_html: true
+output:
+  html_document:
+    theme: cerulean
+    toc: yes
+  pdf_document:
+    toc: no
+---
+
+```{r setup, echo=FALSE, message=FALSE, warning=FALSE}
+# Set up the environment
+library(knitr)
+library(formatR)
+opts_chunk$set(cache.path = "cache/", fig.path = "img/", cache = T, echo = F, dpi = 100, warnings = F, message = F, comment = NA, warning = F, fig.align = "center" , tidy.opts = list(width.cutoff = 60), tidy = TRUE, fig.width = 10) # out.width=700,
+library(pander)
+# panderOptions("table.split.table", Inf)
+set.seed(1)
+library(dplyr)
+options(stringsAsFactors = FALSE)
+```
+
+
+This script performs integrative analysis, and the PR, CR, and Common **masked** anchors for each resolution, anchor type, and window size (for SpectralTAD anchors) will be merged together. Before merging, the anchor dataframes will be modified by adding a `status` column to identify the condition the anchor came from (for the PR dataframe, the status will be PR, and so on). Merging the three conditions allows for combined condition heatmaps and De-novo analysis, which will help visualize the difference in motif enrichments between different conditions more clearly. Followed the vignette in https://snystrom.github.io/memes-manual/articles/integrative_analysis.html, and flanking the anchors was not needed as they were already masked using open chromatin regions. 
+
+
+
+Use RNA seq data from `results/RNA-seq/RNA-seq_2019/UCD52_Human_MGT_vs_LiverMet.xlsx` and filter out genes highly expressed using the baseMean column. This allows for our database to contain only relevant genes. 
+
+
+## Parameters
+- -log10(p.adj.value): cut off for filtering the results from running AME. 
+    - Mustache:
+        - 10kb: 50
+        - 25kb: 100
+        - 50kb & 100kb: 200
+    - HiCcompare:
+        - 10kb: 20
+        - 25kb, 50kb, 100kb: 100
+- max: the maximum -log10(p.adj.value) which is important for coloring the heatmap properly
+    - Mustache: 300
+    - HiCcompare:
+        - 10kb: 80
+        - 25kb: 250
+        - 50kb & 100kb: 300
+- data_type: specifies which data we are using 
+- resolution: resolution string (ex. "100kb")
+- database: the database used for running AME; as of now just using JASPAR or HOCOMOCO but any can be used. 
+- min_basemean: minimum value of baseMean column used to filter out the database to contain only highly expressed genes. Not inclusive. 
+
+**Input:** Masked anchors (PR, CR, Common).
+- Mustache Masked Anchors
+- HiCcompare Masked Anchors
+- Neoloop Masked Anchors
+  - Original Neoloops 
+    - No adjacent, no overlaps (10kb)
+    - Adjacent, overlaps (10kb)
+  - Kavita's Neoloops 
+    - No adjacent, no overlaps (10kb)
+    - Adjacent, overlaps (10kb)
+- SpectralTAD Masked Anchors 
+  - No adjacent, no overlaps (50, 100, 200 window sizes)
+  - Adjacent, overlaps (50, 100, 200 window sizes)
+
+**Output:** 
+
+1. Heatmap of enriched motifs with a -log10(ad.pvalue) > the cut off separated by data type (HiCcompare, Mustache, Neoloops, Kavita Neoloops, SpectralTAD), condition (CR/PR/Common), resolution, window size (for SpectralTAD). Located in the respective data type and anchor folder in `MEME_results/Shuffled`
+2. Correlation heatmap comparing de-novo motifs between each condition (PR/CR/Common) to identify motifs which could distinguish the three conditions for each resolution. Located in the respective data type and anchor folder in
+`Motif_Enrichment/MEME_results/De-novo_results`
+3. Heatmap of AME run on de-novo results to check de-novo motifs. Located in the respective data type and anchor folder in `Motif_Enrichment/MEME_results/De-novo_results`
+    
+# Libraries 
+
+```{r echo=FALSE}
+library(memes)
+library(GenomicRanges)
+library(magrittr)
+library(BSgenome.Hsapiens.UCSC.hg38)
+library(writexl)
+library(VennDiagram)
+library(tidyverse)
+library(gplots)
+library(ggplot2)
+library(universalmotif)
+library(readxl)
+library(dplyr)
+library(sjmisc)
+library(pheatmap)
+```
+
+# Settings 
+
+```{r settings}
+# Maggie's paths 
+dir_home <- "~/Google Drive/My Drive"
+# preprocessing type
+preprocessing = 'any'
+# preprocessing = 'any_neoloops_only'
+# resolution parameter, change for each resolution even for SpectralTAD
+resolution = "10kb"
+# Data type
+# data_type = "Mustache"
+data_type = "Mustache_v2"
+# data_type = "HiCcompare"
+# data_type = "HiCcompare_v1"
+# data_type = "HiCcompare_v2"
+# data_type = "Neoloop"
+# data_type = "Neoloop_v2"
+# data_type = "Kavita_Neoloop"
+# data_type = "SpectralTAD"
+# data_type = "hicFindTADs"
+# data_type = "SpectralTAD_v2"
+# data_type = "hicFindTADs_v2"
+# set minimum base mean parameter to filter out the database 
+min_basemean = 5 # more stringent filtering method 
+# set the database 
+meme_database = "JASPAR"
+# meme_database = "HOCOMOCO"
+
+if (data_type == "Mustache") {
+    dir_data <- file.path(dir_home,"HiC_files/results/Maggie/Mustache_results", paste0("preprocessing_", preprocessing), "Motif_Enrichment/Masked_Anchors")
+    dir_results <- file.path(dir_home,"HiC_files/results/Maggie/Mustache_results", paste0("preprocessing_", preprocessing), "Motif_Enrichment/MEME_results")
+    # Set max parameter for all Mustache loops will be 300
+  max = 300
+  if (resolution == "10kb"){
+    neg.log10.p.adj.cutoff = 50
+  }
+  else {
+    neg.log10.p.adj.cutoff = 100
+  }
+} else if (data_type == "Mustache_v2") {
+    dir_data <- file.path(dir_home,"HiC_files/results/Maggie/Mustache_results_v2", paste0("preprocessing_", preprocessing), "Motif_Enrichment/Masked_Anchors")
+    dir_results <- file.path(dir_home,"HiC_files/results/Maggie/Mustache_results_v2", paste0("preprocessing_", preprocessing), "Motif_Enrichment/MEME_results")
+    # Set max parameter for all Mustache loops will be 300
+  max = 300
+  if (resolution == "10kb"){
+    neg.log10.p.adj.cutoff = 55
+  }
+  else {
+    neg.log10.p.adj.cutoff = 100
+  }
+}else if(data_type == "HiCcompare"){
+    dir_data <- file.path(dir_home,"HiC_files/results/Maggie/HiCcompare_results", paste0("preprocessing_", preprocessing), "Motif_Enrichment/Masked_Anchors")
+    dir_results <- file.path(dir_home,"HiC_files/results/Maggie/HiCcompare_results", paste0("preprocessing_", preprocessing), "Motif_Enrichment/MEME_results")
+    if (resolution == "10kb"){
+    max = 80
+    neg.log10.p.adj.cutoff = 20
+  }
+  else if(resolution == "25kb") {
+    max = 250
+    neg.log10.p.adj.cutoff = 50
+  }
+     else if(resolution == "50kb") {
+    max = 300
+    neg.log10.p.adj.cutoff = 50
+    }
+  else{
+    max = 300
+    neg.log10.p.adj.cutoff = 100
+    }
+}else if(data_type == "HiCcompare_v1"){
+    dir_data <- file.path(dir_home,"HiC_files/results/Maggie/HiCcompare_results_v1", paste0("preprocessing_", preprocessing), "Motif_Enrichment/Masked_Anchors")
+    dir_results <- file.path(dir_home,"HiC_files/results/Maggie/HiCcompare_results_v1", paste0("preprocessing_", preprocessing), "Motif_Enrichment/MEME_results")
+    if (resolution == "10kb"){
+    max = 80
+    neg.log10.p.adj.cutoff = 20
+  }
+  else if(resolution == "25kb") {
+    max = 250
+    neg.log10.p.adj.cutoff = 50
+  }
+     else if(resolution == "50kb") {
+    max = 300
+    neg.log10.p.adj.cutoff = 50
+    }
+  else{
+    max = 300
+    neg.log10.p.adj.cutoff = 100
+    }
+} else if(data_type == "HiCcompare_v2"){
+    dir_data <- file.path(dir_home,"HiC_files/results/Maggie/HiCcompare_results_v2", paste0("preprocessing_", preprocessing), "Motif_Enrichment/Masked_Anchors")
+    dir_results <- file.path(dir_home,"HiC_files/results/Maggie/HiCcompare_results_v2", paste0("preprocessing_", preprocessing), "Motif_Enrichment/MEME_results")
+    if (resolution == "10kb"){
+    max = 80
+    neg.log10.p.adj.cutoff = 10
+  }
+  else if(resolution == "25kb") {
+    max = 250
+    neg.log10.p.adj.cutoff = 50
+  }
+     else if(resolution == "50kb") {
+    max = 300
+    neg.log10.p.adj.cutoff = 50
+    }
+  else{
+    max = 300
+    neg.log10.p.adj.cutoff = 100
+    }
+
+} else if (data_type == "Neoloop") {
+  resolution <- "10kb" # can keep for now, only have 10kb anchors
+  dir_data <- file.path(dir_home,"HiC_files/results/Maggie/Neoloop_results", paste0("preprocessing_", preprocessing),"Motif_Enrichment/Masked_Anchors")
+  dir_results <- file.path(dir_home,"HiC_files/results/Maggie/Neoloop_results", paste0("preprocessing_", preprocessing), "Motif_Enrichment/MEME_results")
+  max = 7
+  neg.log10.p.adj.cutoff = 1
+} else if (data_type == "Neoloop_v2") {
+  resolution <- "10kb" # can keep for now, only have 10kb anchors
+  dir_data <- file.path(dir_home,"HiC_files/results/Maggie/Neoloop_results_v2", paste0("preprocessing_", preprocessing),"Motif_Enrichment/Masked_Anchors")
+  dir_results <- file.path(dir_home,"HiC_files/results/Maggie/Neoloop_results_v2", paste0("preprocessing_", preprocessing), "Motif_Enrichment/MEME_results")
+  if (preprocessing == 'any'){
+  max = 45
+  neg.log10.p.adj.cutoff = 10
+  }else if (preprocessing == 'any_neoloops_only'){
+    max = 7
+  neg.log10.p.adj.cutoff = 1
+  }
+
+} else if (data_type == "Kavita_Neoloop"){
+  # the data type will be Kavita's neoloops 
+  resolution <- "10kb" # can keep for now, only have 10kb anchors
+  dir_data <- file.path(dir_home,"HiC_files/results/Maggie/Neoloop_results/Motif_Enrichment/10-06-2021-neoloopfinder-neoloops-Kavita/Adjacent_overlaps/Masked_Anchors")
+  dir_results <- file.path(dir_home,"HiC_files/results/Maggie/Neoloop_results/Motif_Enrichment/10-06-2021-neoloopfinder-neoloops-Kavita/Adjacent_overlaps/MEME_results")
+  # add in specific max and negative p adj cutoff!!!!!!! 
+  max = 25
+  neg.log10.p.adj.cutoff = 5
+} else if (data_type == "SpectralTAD"){ # The data will be SpectralTAD anchors
+    dir_data <- file.path(dir_home,"HiC_files/results/Maggie/TAD_Boundaries_Analysis/SpectralTAD_results", paste0("preprocessing_", preprocessing), "Motif_Enrichment/Masked_Anchors")
+    dir_results <- file.path(dir_home,"HiC_files/results/Maggie/TAD_Boundaries_Analysis/SpectralTAD_results", paste0("preprocessing_", preprocessing), "Motif_Enrichment/MEME_results")
+    # add in specific max and negative p adj cutoff!!!!!!! 
+    # for window size 50
+    if (resolution == "50kb") {
+      max = 200
+      neg.log10.p.adj.cutoff = 50
+      if (meme_database == "HOCOMOCO") {
+        neg.log10.p.adj.cutoff = 25
+        max = 170
+      }
+    } else{ # for window size 100
+      max = 150
+      neg.log10.p.adj.cutoff = 25
+      # if (meme_database == "HOCOMOCO") {
+        # neg.log10.p.adj.cutoff = 20
+      # }
+    } 
+} else if (data_type == "SpectralTAD_v2"){ # The data will be SpectralTAD_v2 anchors
+    dir_data <- file.path(dir_home,"HiC_files/results/Maggie/TAD_Boundaries_Analysis/SpectralTAD_results_v2", paste0("preprocessing_", preprocessing), "Motif_Enrichment/Masked_Anchors")
+    dir_results <- file.path(dir_home,"HiC_files/results/Maggie/TAD_Boundaries_Analysis/SpectralTAD_results_v2", paste0("preprocessing_", preprocessing), "Motif_Enrichment/MEME_results")
+    # add in specific max and negative p adj cutoff!!!!!!! 
+    # for window size 50
+    if (resolution == "50kb") {
+      max = 200
+      neg.log10.p.adj.cutoff = 50
+      if (meme_database == "HOCOMOCO") {
+        neg.log10.p.adj.cutoff = 25
+        max = 170
+      }
+    } else{ # for window size 100
+      max = 150
+      neg.log10.p.adj.cutoff = 25
+      # if (meme_database == "HOCOMOCO") {
+        # neg.log10.p.adj.cutoff = 20
+      # }
+    } 
+} else if (data_type == "hicFindTADs"){ # The data will be hicFindTAD anchors
+    dir_data <- file.path(dir_home,"HiC_files/results/Maggie/TAD_Boundaries_Analysis/hicFindTADs_results", paste0("preprocessing_", preprocessing), "Motif_Enrichment/Masked_Anchors")
+    dir_results <- file.path(dir_home,"HiC_files/results/Maggie/TAD_Boundaries_Analysis/hicFindTADs_results", paste0("preprocessing_", preprocessing), "Motif_Enrichment/MEME_results")
+    max = 90
+  neg.log10.p.adj.cutoff = 15
+  if(meme_database == "HOCOMOCO"){
+    max = 80
+  }
+} else if (data_type == "hicFindTADs_v2"){ # The data will be hicFindTAD_v2 anchors
+    dir_data <- file.path(dir_home,"HiC_files/results/Maggie/TAD_Boundaries_Analysis/hicFindTADs_results_v2", paste0("preprocessing_", preprocessing), "Motif_Enrichment/Masked_Anchors")
+    dir_results <- file.path(dir_home,"HiC_files/results/Maggie/TAD_Boundaries_Analysis/hicFindTADs_results_v2", paste0("preprocessing_", preprocessing), "Motif_Enrichment/MEME_results")
+    max = 90
+  neg.log10.p.adj.cutoff = 15
+  if(meme_database == "HOCOMOCO"){
+    max = 80
+  }
+}
+
+# data directory of RNA seq results, used in the future 
+dir_data_rna_seq <- file.path(dir_home, "HiC_files/results/RNA-seq/2021.11.19_UCD52_DEG/data/Data_Human_DESeq2_UCD52_DEGs_Untreated.vs.CarboplatinResistant_11.19.21.txt")
+# set the database file depending on the meme_database parameter set above
+if (meme_database == "JASPAR") {
+  database_file = "misc/JASPAR.meme"
+} else{
+  database_file = "misc/HOCOMOCOv11_core_HUMAN_mono_meme_format.meme"
+}
+```
+
+# Filter Database
+
+Filter the database to contain genes with a basemean value greater than the minimum value specified above. Then set the AME database to the filtered database. Note: The HOCOMOCO database has NA for altname column, so we will have to use the name column to filter instead. 
+
+```{r rnaseq}
+#### HOCOMOCO database does not have an altname 
+# load the motif database and then convert it to a dataframe to more easily manipulate it
+meme_db <- read_meme(database_file) %>% 
+  to_df()
+# read in the file as a dataframe 
+RNA_seq <- read.table(dir_data_rna_seq, header = TRUE)
+# plot RNA seq basemean distribution 
+# hist(RNA_seq$baseMean, breaks = 1000, xlim = c(0,2000), ylim = c(0,3000))
+# filter out only the expressed genes using the min_basemean parameter
+expressed_genes <- RNA_seq %>% 
+  dplyr::group_by(symbol) %>% 
+  dplyr::filter(baseMean > min_basemean)
+
+if (meme_database == 'JASPAR'){
+# filter the full motif database to select only those motifs corresponding to expressed genes for JASPAR ONLY
+meme_db_expressed <- meme_db %>% 
+  # the altname slot of meme_db contains the gene symbol
+  # (this is database-specific)
+  dplyr::filter(altname %in% expressed_genes$symbol)
+} else{
+  # For HOCOMOCO, we have to create the altname column to be able to filter the rows 
+  meme_db_expressed <- meme_db %>% 
+    # create the altname by separating the name column by underscore, the extra_name column will be removed when we set this filtered database as the MEME database below. 
+    separate(name, into = c('altname', 'extra_name'), sep = '_', remove = FALSE) %>% 
+    # filter the df using the newly created altname column 
+    filter(altname %in% expressed_genes$symbol)
+}
+# look how how many rows are in each, before and after
+# nrow(meme_db) # 726 for JASPAR; 401 for HOCOMOCO
+# nrow(meme_db_expressed) # 426 for JASPAR; 229 for HOCOMOCO
+# now set the updated database to the meme database to be used in the future analysis 
+# to_list() converts the database back from data.frame format to a standard `universalmotif` object.
+options(meme_db = to_list(meme_db_expressed, extrainfo = FALSE))
+#> Discarding unknown slot(s) 'eval.string' (set `extrainfo=TRUE` to
+#>   preserve these).
+```
+
+# Files
+
+Read in masked bed files of anchors 
+
+```{r files}
+PR <- read.table(file.path(dir_data, paste0('masked_PR_anchors_',resolution, '.bed')),header = FALSE, sep="\t",stringsAsFactors=FALSE, quote="")
+CR <- read.table(file.path(dir_data, paste0( 'masked_CR_anchors_',resolution, '.bed')),header = FALSE, sep="\t",stringsAsFactors=FALSE, quote="")
+PR_Common <- read.table(file.path(dir_data, paste0( 'masked_PR_Common_anchors_',resolution, '.bed')),header = FALSE, sep="\t",stringsAsFactors=FALSE, quote="")
+CR_Common <- read.table(file.path(dir_data, paste0( 'masked_CR_Common_anchors_',resolution, '.bed')),header = FALSE, sep="\t",stringsAsFactors=FALSE, quote="")
+```
+
+# GRanges 
+
+Convert bed files to GRanges & add `status` column according to the condition 
+
+``` {r GR}
+GR_PR = GRanges(seqnames=PR$V1, 
+                      ranges= IRanges(start=PR$V2, end=PR$V3))
+GR_PR$status = "PR"
+
+GR_CR = GRanges(seqnames=CR$V1, 
+                      ranges= IRanges(start=CR$V2, end=CR$V3))
+GR_CR$status = "CR"
+
+GR_PR_Common = GRanges(seqnames=PR_Common$V1, 
+                      ranges= IRanges(start=PR_Common$V2, end=PR_Common$V3))
+GR_PR_Common$status = "PR Common"
+
+GR_CR_Common = GRanges(seqnames=CR_Common$V1, 
+                      ranges= IRanges(start=CR_Common$V2, end=CR_Common$V3))
+GR_CR_Common$status = "CR Common"
+``` 
+
+# Combine Conditions
+
+Combine masked anchors into one dataframe to run integrated analysis.
+
+```{r combine}
+combined_anchors <- c(GR_PR, GR_CR, GR_PR_Common, GR_CR_Common)
+```
+
+# Examination of conditions with AME 
+
+First collect the sequences of each category (condition). The data are returned as a Biostrings List, where each list entry represents the sequences of each anchor condition (CR, Common, PR).
+
+```{r sequences}
+by_status <- combined_anchors %>%
+  # Get a list of anchors belonging to each set
+  split(mcols(.)$status) %>%
+  # look up the DNA sequence of each anchor within each group
+  get_sequence(BSgenome.Hsapiens.UCSC.hg38)
+```
+
+Now, we test each set of sequences using AME with the `runAme` function. This will run AME on each set of input sequences in the Biostrings List. Returns a list object where each entry is the AME results for each status or condition.
+
+```{r ame}
+ame_by_status <- by_status %>% 
+  runAme()
+```
+
+View the results for each status
+
+```{r results1}
+print('CR AME results')
+ame_by_status$CR
+print('CR Common AME results')
+ame_by_status$`CR Common`
+print('PR Common AME results')
+ame_by_status$`PR Common`
+print('PR AME results')
+ame_by_status$PR
+```
+
+## Visualize AME results 
+
+Use `dplyr::bind_rows()` to combine the lists of AME results into a single dataframe and the different statuses will be used to distinguish each AME run using the `status` column. (Use .id = "status" which will create a new column "status" that will contain the names from ame_by_status_resolution list, corresponding to the different conditions PR, CR, Common)
+
+```{r combineresults}
+ame_results <- ame_by_status %>% 
+  dplyr::bind_rows(.id = "status")
+```
+
+Aggregate results from multiple runs (different conditions) to produce one heatmap by setting the group parameter in plot_ame_heatmap() to status. To reduce redunant motifs, use motif_alt_id as the id for plot_ame_heatmap(), and select the hit for each transcription factor with the most significant hit. 
+
+```{r heatmap1}
+ame_results %>% 
+  # perform the next dplyr operation on each TF within each status
+  dplyr::group_by(status, motif_alt_id) %>%
+  # within each status, select the TF hit with the lowest adjusted p-value
+  dplyr::filter(adj.pvalue == min(adj.pvalue)) %>% 
+  plot_ame_heatmap(group = status, id = motif_alt_id) +
+    labs(y = "Anchor Condition",
+         x = "Transcription Factor Motif") +
+   scale_y_discrete(limits = c("CR", "PR", "CR Common", "PR Common"))
+```
+
+Visualize the number of hits and -log10 p adjusted value to determine the correct cut off for capturing only the most significant hits.
+
+```{r comparemethods}
+ame_results %>% 
+  dplyr::group_by(status, motif_alt_id) %>% 
+  dplyr::filter(adj.pvalue == min(adj.pvalue)) %>% 
+  ame_compare_heatmap_methods(group = status)
+```
+
+Now, we can visualize the most significant hits using the -log10(p adjusted) cutoff: `r neg.log10.p.adj.cutoff`.
+
+```{r filteredheatmap, fig.width= 20, fig.height=10}
+# Obtain the best hits, reduces the redundancy if the motif_alt_id is all the same 
+best_ame_hits <- ame_results %>% 
+  dplyr::group_by(status, motif_alt_id) %>% 
+  dplyr::filter(adj.pvalue ==  min(adj.pvalue))
+
+# Now plot the best hits capped at setting predefined in the beginning using the graph generated in the code block above ^^ 
+best_ame_hits %>% 
+  dplyr::filter(-log10(adj.pvalue) > neg.log10.p.adj.cutoff) %>%
+  dplyr::arrange(motif_alt_id) %>% 
+  plot_ame_heatmap(group = status, id = motif_alt_id) +
+    labs(x = "Motif",
+         y = "Condition",
+         title = paste0(data_type, " ", resolution, " Anchors")) + 
+  scale_fill_gradient2(low="white", 
+                       mid="pink", 
+                       high="red", 
+                       midpoint=((neg.log10.p.adj.cutoff + max)/2)) +
+   scale_y_discrete(limits = c("CR", "PR", "CR Common", "PR Common"),
+                    labels = c("CR" = "CR Unique", "PR" = "PR Unique",
+                               "CR Common" = "CR Common", 
+                               "PR Common" = "PR Common")) +
+  theme_bw(base_size = 13) +
+  theme(#text = element_text(size = 20),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1, size = 12),
+        #axis.text.y = element_text(size = 20),
+        plot.title = element_text(hjust = 0.5),
+        axis.title = element_text(size = 14))
+        
+  
+ggsave(file.path(dir_results, 'Shuffled', paste0(meme_database, '_', data_type,'_',resolution,'_MEME_IA_results_by_condition.svg')), width = 11, height = 7)
+```
+
+**Commented out the De-Novo and TomTom analyses**
+
+
+# De-novo Motif Similiarity by Condition
+
+Use the MEME tool Dreme which discovers short de-novo motifs in input sequences, does not rely on known motif information. Run Dreme on each status (condition) for each resolution, then combine the list of Dreme results per resolution. Use the same by_status_resolution object as we did in the AME example above. 
+
+```{r dreme, eval = FALSE}
+dreme_by_status <- by_status %>% 
+  runDreme("shuffle", nmotifs = 5) %>% 
+  dplyr::bind_rows(.id = "status")
+```
+
+## Correlation Heatmap
+
+Examine the de-novo motifs between each status or condition, which will identify motifs that could distinguish the three different conditions. Examine the correlation score between each motif and rename the motifs to indicate which status they were found in. 
+Create the correlation heatmap for the de-novo results.
+
+```{r examine_dreme, eval = FALSE}
+dreme_by_status_renamed <- dreme_by_status %>% 
+  dplyr::mutate(name = paste(status, seq, sep = "_")) %>% 
+  # update_motifs updates the information in the special `motif` column
+  update_motifs()
+
+cols <- colorRampPalette(c("white", "red"))(255)
+
+# This is for adding the colored annotation blocks indicating group membership
+# to the heatmap
+anno.df <- dreme_by_status_renamed %>% 
+  dplyr::select(name, status) %>% 
+  tibble::remove_rownames() %>% 
+  tibble::column_to_rownames("name")
+
+dreme_by_status_renamed %>%
+  # Convert to universalmotif format 
+  to_list() %>%
+  # Compute the pearson correlation for each motif with all other motifs
+  universalmotif::compare_motifs(method = "PCC") %>%
+  # Plot the correlation matrix along with the annotations
+  pheatmap::pheatmap(color = cols,
+                     # This sets the heatmap range to be from 0-1
+                     breaks = seq(0, 1, by = 1/255),
+                     annotation_col = anno.df,
+                     # the cutree options are just cosmetic to add some spacing
+                     # between some of the clusters
+                     cutree_rows = 6,
+                     cutree_cols = 6,
+                     show_colnames = FALSE, main = paste0(data_type, " ", ifelse(data_type == "SpectralTAD", window_size, resolution), ' De-novo Motif Similarity by Condition'), fontsize = 8) 
+```
+
+```{r save_denovo, eval = FALSE}
+dreme_by_status_renamed %>%
+  # Convert to universalmotif format 
+  to_list() %>%
+  # Compute the pearson correlation for each motif with all other motifs
+  universalmotif::compare_motifs(method = "PCC") %>%
+  # Plot the correlation matrix along with the annotations
+  pheatmap::pheatmap(color = cols,
+                     # This sets the heatmap range to be from 0-1
+                     breaks = seq(0, 1, by = 1/255),
+                     annotation_col = anno.df,
+                     # the cutree options are just cosmetic to add some spacing
+                     # between some of the clusters
+                     cutree_rows = 6,
+                     cutree_cols = 6,
+                     show_colnames = FALSE, filename = file.path(dir_results, 'De-novo_results', paste0(data_type,'_',ifelse(data_type == "SpectralTAD", window_size, resolution),'_De-novo_results_by_condition.png' )), main = paste0(data_type, " ", ifelse(data_type == "SpectralTAD", window_size, resolution), ' De-novo Motif Similarity by Condition')) 
+```
+
+## Test de-novo motif enrichment using AME
+
+Use AME to test for motif enrichment of the de-novo discovered motifs within each status category, and determine whether the motifs detected in one category are indeed enriched in another. To do this, we can provide the de-novo motifs as the AME database to test for their enrichment in each sequence category
+
+```{r dremeAME, eval = FALSE}
+ame_denovo_by_status <- by_status %>% 
+  runAme(database = list("denovo_status_motifs" = dreme_by_status_renamed)) %>% 
+  dplyr::bind_rows(.id = "status") 
+```
+
+Plot the heatmap of de-novo AME results
+
+```{r dremeAME_heatmap, eval = FALSE}
+ame_denovo_by_status %>% 
+  plot_ame_heatmap(group = status, scale_max = 10) +
+  labs(x = NULL,
+         title = paste0(data_type, " ", ifelse(data_type == "SpectralTAD", window_size, resolution), " De-Novo AME results"))
+
+ggsave(file.path(dir_results, 'De-novo_results', paste0(data_type, '_' , ifelse(data_type == "SpectralTAD", window_size, resolution),'_de-novo_AME_results.png' )))
+```
+
+Plotting the heatmap of results reveals that indeed a majority of the de-novo motifs discovered within a single category are detected in all 3 conditions, supporting the conclusion that CR, PR, and Common conditions are highly similar in sequence content.
+
+### Use TomTom to match de-novo motifs to known TF motifs
+
+```{r filterCommon, eval = FALSE}
+ interesting_motifs <- ame_denovo_by_status %>% 
+  # dplyr::filter(motif_id %in% c("Common_RTAAAYA", "CR_DAAATA", "PR_RTAAATR", "Common_CCTYCY")) %>% 
+  # dplyr::filter(!motif_id %in% c("PR_TGAVTCAB", "CR_TGASTMA", "Common_RTGAGTMA")) %>% 
+  # dplyr::filter(motif_id %in% c("CR_GDAAATR")) %>% 
+  dplyr::filter(motif_id %in% c("PR_CACGY", "PR_GCCTCMB")) %>% 
+  #dplyr::filter(motif_id %in% c("CR_RKAAATA", "CR_CCCAGSM", "PR_VAGGAAR", "CR_AGGCNGAG", "Common_GGGATTAY", "PR_GYAAAYA", "Common_CAGCCTGG", "PR_ATGAWTMA")) %>% 
+  # dplyr::filter(motif_id %in% c("Common_AAATAH", "PR_CAGGYRTG", "PR_AAATAH", "Common_CCCAGSM", "CR_RDAAATA", "CR_GCCTCCCR", "CR_RCCTGKAA")) %>% 
+  dplyr::pull(motif_id)
+
+ame_denovo_status_unique <- ame_denovo_by_status %>% 
+  dplyr::filter((motif_id %in% 
+                   interesting_motifs))
+```
+
+Next, we use the motif id's from the unique AME results to select the entries in the Dreme results object and run TomTom on that subset. Any difference in expression between the three conditions will be looked at, since the expression levels of the different conditions appear to be somewhat similar. 
+
+```{r tomtom, eval = FALSE}
+# for Tom Tom we probably have to change the name column to have the altname in it for JASPAR database 
+if(meme_database == 'JASPAR'){
+  new_meme_db <- meme_db_expressed %>%  
+    mutate(name = paste(altname, name, sep = "_")) 
+  
+  options(meme_db = to_list(new_meme_db, extrainfo = FALSE))
+}
+
+dreme_by_status_filtered <- dreme_by_status_renamed %>% 
+    dplyr::filter(name %in% 
+                    ame_denovo_status_unique$motif_id) %>% 
+  runTomTom(dist = "ed")
+```
+
+Visualize TomTom results 
+
+```{r tomtom_results, fig.width=30, fig.height= 20, eval = FALSE}
+dreme_by_status_filtered %>% 
+  view_tomtom_hits(3) %>%
+  cowplot::plot_grid(plotlist = ., 
+                     nrow = 1,
+                     labels = "AUTO",
+                     byrow = TRUE)
+```
+

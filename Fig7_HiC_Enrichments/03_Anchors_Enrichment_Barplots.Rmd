@@ -1,0 +1,113 @@
+---
+title: "Mustache 10kb Enrichment Barplots"
+author: "Maggie Marshall"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: no
+  html_document:
+    theme: cerulean
+    toc: yes
+---
+```{r setup, echo=FALSE, message=FALSE, warning=FALSE}
+# Set up the environment
+library(knitr)
+opts_chunk$set(cache.path='cache/', fig.path='img/', cache=F, tidy=T, fig.keep='high', echo=F, dpi=100, warnings=F, message=F, comment=NA, warning=F, results='as.is', fig.width = 10, fig.height = 6) #out.width=700, 
+library(pander)
+panderOptions('table.split.table', Inf)
+set.seed(1)
+library(dplyr)
+options(stringsAsFactors = FALSE)
+```
+
+This script takes in the output from running KEGG enrichment on Mustache 10kb anchors stored in `Supplementary_Table_4.xlsx` and produces a grouped barplot for selected KEGG enrichment pathways containing the -log10(p.adj) value for the unique PR and CR results. 
+
+# Libraries 
+
+```{r lib}
+library(tidyverse)
+library(readxl)
+library(cowplot)
+library(ggplot2)
+library(stringr)
+library("ggsci")
+library(scales)
+scales::show_col(pal_lancet("lanonc")(8))
+mycols = pal_lancet("lanonc")(8)
+library(forcats)
+library(purrr)
+```
+
+# Settings 
+
+```{r settings}
+# Data
+# Working directory
+# Mikhail's paths
+# data_dir       <- "/Users/mdozmorov/Documents/Data/GoogleDrive/HiC_files/results/manuscript/Tables_Mustache_10kb_Enrichment"
+# Maggie's paths
+# data input and output will be the same directory 
+data_dir       <- "~/Google Drive/My Drive/HiC_files/results/manuscript/Supplementary_Table_4"
+# input file
+input <- file.path(data_dir, "Supplementary_Table_4.xlsx")
+# sheet names, KEGG, will need to add PR and CR to the front when reading in 
+sheet1 <- "unique.KEGG"
+# output plot name 
+# first for KEGG
+outputPlot1 <- file.path(data_dir, "Mustache_v2_10kb_KEGG_Enrichment_barplots.svg")
+# KEGG terms to plot 
+KEGG_terms <- c("Wnt signaling pathway","ECM-receptor interaction", 
+                                               "Breast cancer", "mTOR signaling pathway", "Focal adhesion",
+                                               "Pathways in cancer")
+```
+
+# Read in files 
+
+```{r files}
+# read in PR KEGG sheet 
+PR.KEGG.enrich <- read_xlsx(input, sheet = paste0("PR", sheet1)) 
+# read in CR KEGG sheet 
+CR.KEGG.enrich <- read_xlsx(input, sheet = paste0("CR", sheet1)) 
+```
+
+# Filter terms and add -log10(p.adjust) column 
+
+```{r manipulate}
+# add condition column to designate which condition, PR or CR, the observation is in so we will know after combining the PR and CR dataframes for each enrichment category 
+PR.KEGG.enrich$condition = "PR"
+CR.KEGG.enrich$condition = "CR"
+
+# then combine the two KEGG dataframes and two Hallmark dataframes 
+KEGG.df = rbind(PR.KEGG.enrich, CR.KEGG.enrich)
+# filter the dataframes to contain only the relevant terms 
+KEGG.df = KEGG.df %>% 
+  dplyr::filter(Term %in% KEGG_terms) %>% # only keep the important KEGG pathways 
+  dplyr::mutate(log10.padj = -log10(Adjusted.P.value)) %>% # add log10.padj column
+  dplyr::select(Term, log10.padj, condition)  %>% # only keep important columns needed for plotting 
+  # change term to factor so we can order accordingly in plot 
+  dplyr::mutate(Term = factor(Term, levels = KEGG_terms)) %>% 
+  # change condition to factor so CR will be first in plot 
+  dplyr::mutate(condition = factor(condition, levels = c("PR", "CR")))
+```
+
+# Plot each Enrichment Category 
+
+```{r plot}
+# create KEGG bar plot 
+KEGG.BP =  KEGG.df %>% 
+  ggplot(aes(fill = condition, y = log10.padj, x = Term)) +
+  geom_bar(stat = "identity", position = position_dodge2(preserve = "single"), width = 1) +
+  coord_flip() +
+  theme_bw(base_size = 15) +
+  # get rid of the grid 
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(), 
+        text = element_text(size = 15),
+        legend.position = c(0.8, 0.30)) +
+  scale_fill_manual(values = mycols[1:2]) + # change colors 
+  xlab("Pathway") +
+  ylab("-log10(adjusted p-value)")
+
+# save KEGG plot
+ggsave(filename = outputPlot1, plot = KEGG.BP, width = 7, height = 3)
+```

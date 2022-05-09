@@ -1,0 +1,44 @@
+#!/bin/bash
+#PBS -S /bin/bash
+#PBS -l nodes=1
+#PBS -M marshallma4@vcu.edu
+#PBS -m ae
+#PBS -N mustacheapa
+#PBS -j oe
+#PBS -q workq
+# PBS -V
+
+cd $PBS_O_WORKDIR
+# https://github.com/aidenlab/juicer/wiki/APA
+
+DIRIN=/home/sequencing/juicer/Mikhail/PDXproject_analysis/03.Arima_samples_juicer
+DIROUT=/home/marshallma4/PDXHiC/Mustache/preprocessing_any/APA
+
+# HiC Files
+FILE=( UCD52PR UCD52CR )
+# Loop directory
+LOOPDIR=/home/marshallma4/PDXHiC/Mustache/preprocessing_any
+# Loop resolution
+LOOPRES=( 10kb 25kb 50kb 100kb )
+LOOPNUM=( 10000 25000 50000 100000 )
+# File suffix, corresponds to the loop conditions 
+FILESUFFIX=( PR_unique CR_unique PR_common CR_common )
+# Normalization suffix for 
+LOOPNORM=( KR )
+# Loop through all combinations
+# iterate through each condition's HiC file 
+for n in ${LOOPNORM[@]}; do
+	for f in ${FILE[@]}; do
+		# iterate through each loop file 
+		for fs in ${FILESUFFIX[@]}; do
+			# iterate through each resolution 
+			for res in {0..3}; do
+				/home/sequencing/juicer/Mikhail/scripts/common/juicer_tools apa -u \
+					-k ${n} -r ${LOOPNUM[$res]} \
+					${DIRIN}/${f}.hic \
+					${LOOPDIR}/loops_${fs}_${LOOPRES[$res]}.bedpe \
+					${DIROUT}/${f}_${LOOPRES[$res]}_${n}_${fs};
+			done;
+		done;
+	done;
+done
