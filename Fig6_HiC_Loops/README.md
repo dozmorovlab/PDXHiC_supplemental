@@ -16,7 +16,7 @@
   - Output: piecharts for each condition and resolution showing loop size
 
 <!--Desktop/PDXHiC/Maggie/18_CTCF_orientation.sh -->
-- `04_CTCF_Orientation.sh` - CTCF orientation piecharts
+- `04_CTCF_Orientation.sh` - CTCF orientation piecharts. `fimo.bed` - CTCF motif sites
   - Input: `fimo.bed` hg38 CTCF motif file, loop bedpe files for each condition and resolution
   - Output: CTCF orientation piecharts for each condition and resolution
   
