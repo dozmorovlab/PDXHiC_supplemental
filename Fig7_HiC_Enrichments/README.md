@@ -28,6 +28,7 @@
 <!-- Desktop/PDXHiC/Mikhail/08_UniBind_plots.Rmd -->
 - `05_Unibind_Plots.Rmd` - UniBind beeswarm plots for 10kb and 25kb loop anchors
   - Input: output from running UniBind differential analysis on masked CR loop anchors vs. masked PR loop anchors produced by `04a_Anchor_Masking.Rmd`
+  - `allEnrichments.tsv` - UniBind results (source: /Users/mdozmorov/Documents/Data/GoogleDrive/HiC_files/results/Maggie/Mustache_results_v2/preprocessing_any/Motif_Enrichment/UniBind_results/Differential_No_Background/CR_vs_PR/Diff_10kb_CR_vs_PR/allEnrichments.tsv)
   - Output: UniBind transcription factor enrichment plots for each resolution 
   
 <!-- Desktop/PDXHiC/Maggie/42_Supplementary_Gene_Enrichment_Barplots.Rmd -->
